@@ -92,9 +92,13 @@ const updateSheetWithStatus = async (sheetId, accessToken, refreshToken, emailCo
           row.push('');
         }
         
+        // Convert dates to IST
+        const sentAtIST = status.sentAt ? new Date(status.sentAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
+        const openedAtIST = status.openedAt ? new Date(status.openedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
+        
         row[statusColIndices['Email Status']] = status.status;
-        row[statusColIndices['Sent At']] = status.sentAt || '';
-        row[statusColIndices['Opened At']] = status.openedAt || '';
+        row[statusColIndices['Sent At']] = sentAtIST;
+        row[statusColIndices['Opened At']] = openedAtIST;
         row[statusColIndices['Open Count']] = status.openCount || '0';
         
         updates.push({

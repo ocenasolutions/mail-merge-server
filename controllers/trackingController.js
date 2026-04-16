@@ -7,12 +7,36 @@ exports.trackOpen = async (req, res) => {
   try {
     const { trackingId } = req.params;
     
+    const userAgent = req.headers['user-agent'] || '';
+    const ip = req.ip;
+    
     logger.info({ 
       trackingId, 
-      userAgent: req.headers['user-agent'],
-      ip: req.ip,
+      userAgent,
+      ip,
       referer: req.headers['referer']
     }, '📧 Tracking pixel request received');
+
+    // Filter out automated/bot requests
+    const isBot = /bot|crawler|spider|headless|prerender|proxy|prefetch|scanner/i.test(userAgent);
+    const isGoogleProxy = /google/i.test(userAgent) || ip.includes('66.102') || ip.includes('66.249');
+    const isEmailProxy = /yahoo|outlook|microsoft|apple|icloud/i.test(userAgent);
+    
+    if (isBot || isGoogleProxy || isEmailProxy) {
+      logger.info({ trackingId, userAgent, reason: 'bot/proxy detected' }, '⚠️ Ignoring automated request');
+      
+      // Still send pixel but don't count it
+      const pixel = Buffer.from(
+        'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+        'base64'
+      );
+      res.writeHead(200, {
+        'Content-Type': 'image/gif',
+        'Content-Length': pixel.length,
+        'Cache-Control': 'no-store, no-cache, must-revalidate, private'
+      });
+      return res.end(pixel);
+    }
 
     const recipient = await Recipient.findOne({ trackingId });
     if (!recipient) {
@@ -74,7 +98,6 @@ exports.trackOpen = async (req, res) => {
     );
 
     // If accessed from browser (not as image), show a message
-    const userAgent = req.headers['user-agent'] || '';
     const accept = req.headers['accept'] || '';
     const isImageRequest = accept.includes('image/') || accept.includes('*/*');
     
@@ -109,7 +132,7 @@ exports.trackOpen = async (req, res) => {
             <p>This email has been successfully tracked and marked as opened.</p>
             <p style="font-size: 14px; color: #999; margin-top: 30px;">
               Email: ${recipient.email}<br>
-              Opened: ${new Date().toLocaleString()}<br>
+              Opened: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}<br>
               Total Opens: ${tracking.openCount}
             </p>
           </div>

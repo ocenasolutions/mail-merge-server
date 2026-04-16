@@ -46,8 +46,8 @@ const updateGoogleSheetStatus = async (campaign, user) => {
 
       statusData[recipient.email] = {
         status: status,
-        sentAt: recipient.sentAt ? new Date(recipient.sentAt).toLocaleString() : '',
-        openedAt: tracking?.firstOpenedAt ? new Date(tracking.firstOpenedAt).toLocaleString() : '',
+        sentAt: recipient.sentAt || '',
+        openedAt: tracking?.firstOpenedAt || '',
         openCount: tracking?.openCount || 0
       };
     }
