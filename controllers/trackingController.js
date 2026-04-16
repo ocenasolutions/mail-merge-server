@@ -17,13 +17,11 @@ exports.trackOpen = async (req, res) => {
       referer: req.headers['referer']
     }, '📧 Tracking pixel request received');
 
-    // Filter out automated/bot requests
-    const isBot = /bot|crawler|spider|headless|prerender|proxy|prefetch|scanner/i.test(userAgent);
-    const isGoogleProxy = /google/i.test(userAgent) || ip.includes('66.102') || ip.includes('66.249');
-    const isEmailProxy = /yahoo|outlook|microsoft|apple|icloud/i.test(userAgent);
+    // Only filter out obvious bots/crawlers, not email clients
+    const isObviousBot = /bot|crawler|spider|headless|prerender|scanner|curl|wget/i.test(userAgent);
     
-    if (isBot || isGoogleProxy || isEmailProxy) {
-      logger.info({ trackingId, userAgent, reason: 'bot/proxy detected' }, '⚠️ Ignoring automated request');
+    if (isObviousBot) {
+      logger.info({ trackingId, userAgent, reason: 'obvious bot detected' }, '⚠️ Ignoring bot request');
       
       // Still send pixel but don't count it
       const pixel = Buffer.from(
