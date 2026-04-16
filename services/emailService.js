@@ -143,6 +143,28 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
         );
         break;
 
+      case 'brevo':
+        const fromName = emailConfig.config.fromName || emailConfig.config.email.split('@')[0];
+        await axios.post(
+          'https://api.brevo.com/v3/smtp/email',
+          {
+            sender: { 
+              email: emailConfig.config.email,
+              name: fromName
+            },
+            to: [{ email: recipient }],
+            subject,
+            htmlContent: bodyWithTracking
+          },
+          {
+            headers: {
+              'api-key': emailConfig.config.apiKey,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+        break;
+
       default:
         throw new Error('Unsupported email provider');
     }
@@ -194,6 +216,14 @@ const testEmailConnection = async (emailConfig, user) => {
           }
         );
         return { success: true, message: 'Mailgun credentials valid' };
+
+      case 'brevo':
+        await axios.get('https://api.brevo.com/v3/account', {
+          headers: {
+            'api-key': emailConfig.config.apiKey
+          }
+        });
+        return { success: true, message: 'Brevo API key valid' };
 
       default:
         return { success: false, message: 'Unsupported provider' };

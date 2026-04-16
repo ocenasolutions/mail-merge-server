@@ -13,7 +13,7 @@ const emailConfigSchema = new mongoose.Schema({
   },
   provider: {
     type: String,
-    enum: ['gmail', 'smtp', 'sendgrid', 'mailgun'],
+    enum: ['gmail', 'smtp', 'sendgrid', 'mailgun', 'brevo'],
     required: true
   },
   config: {
@@ -27,15 +27,16 @@ const emailConfigSchema = new mongoose.Schema({
       set: encrypt,
       get: decrypt
     },
-    // For SendGrid/Mailgun
+    // For SendGrid/Mailgun/Brevo
     apiKey: {
       type: String,
       set: encrypt,
       get: decrypt
     },
     domain: String, // For Mailgun
-    // For Gmail
-    email: String
+    // For Gmail/SendGrid/Mailgun/Brevo
+    email: String,
+    fromName: String // For Brevo
   },
   isDefault: {
     type: Boolean,
