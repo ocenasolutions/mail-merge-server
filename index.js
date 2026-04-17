@@ -26,8 +26,31 @@ app.use(pinoHttp({
 
 // Middleware
 app.use(helmet());
+
+// CORS configuration to support multiple origins
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://aischool.com',
+  'https://mail-merger2.netlify.app',
+  process.env.CLIENT_URL
+].filter(Boolean);
+
 app.use(cors({
-  origin: process.env.CLIENT_URL,
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Check if the origin is in the allowed list or matches the pattern
+    const isAllowed = allowedOrigins.some(allowed => 
+      origin === allowed || origin.startsWith(allowed)
+    );
+    
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 app.use(express.json());

@@ -6,20 +6,34 @@ const { protect } = require('../middleware/auth');
 
 // @route   GET /api/auth/google
 // @desc    Initiate Google OAuth
-router.get('/google', passport.authenticate('google', {
-  scope: [
-    'profile', 
-    'email', 
-    'https://www.googleapis.com/auth/spreadsheets'  // Changed from .readonly to full access
-  ],
-  accessType: 'offline',
-  prompt: 'consent'
-}));
+router.get('/google', (req, res, next) => {
+  // Get the origin from referer header or query parameter
+  let origin = req.query.origin || req.headers.referer || process.env.CLIENT_URL;
+  
+  // Clean up the origin to get just the base URL
+  try {
+    const url = new URL(origin);
+    origin = `${url.protocol}//${url.host}`;
+  } catch (error) {
+    origin = process.env.CLIENT_URL;
+  }
+  
+  passport.authenticate('google', {
+    scope: [
+      'profile', 
+      'email', 
+      'https://www.googleapis.com/auth/spreadsheets'  // Changed from .readonly to full access
+    ],
+    accessType: 'offline',
+    prompt: 'consent',
+    state: Buffer.from(origin).toString('base64') // Pass origin as state
+  })(req, res, next);
+});
 
 // @route   GET /api/auth/google/callback
 // @desc    Google OAuth callback
 router.get('/google/callback',
-  passport.authenticate('google', { session: false, failureRedirect: `${process.env.CLIENT_URL}/login` }),
+  passport.authenticate('google', { session: false, failureRedirect: `${process.env.CLIENT_URL}/mail-merge/login` }),
   (req, res) => {
     const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, {
       expiresIn: process.env.JWT_EXPIRE
@@ -32,7 +46,22 @@ router.get('/google/callback',
       name: req.user.name
     };
 
-    res.redirect(`${process.env.CLIENT_URL}/auth/callback?token=${token}&user=${encodeURIComponent(JSON.stringify(userData))}`);
+    // Determine the redirect URL based on state parameter
+    let baseUrl = process.env.CLIENT_URL;
+    
+    try {
+      // Get origin from state parameter
+      if (req.query.state) {
+        const decodedOrigin = Buffer.from(req.query.state, 'base64').toString('utf-8');
+        if (decodedOrigin.startsWith('http')) {
+          baseUrl = decodedOrigin;
+        }
+      }
+    } catch (error) {
+      console.error('Error decoding state:', error);
+    }
+    
+    res.redirect(`${baseUrl}/mail-merge/auth/callback?token=${token}&user=${encodeURIComponent(JSON.stringify(userData))}`);
   }
 );
 
