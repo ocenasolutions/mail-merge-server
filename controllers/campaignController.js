@@ -19,6 +19,37 @@ exports.getCampaigns = async (req, res) => {
   }
 };
 
+exports.getStats = async (req, res) => {
+  try {
+    const campaigns = await Campaign.find({ userId: req.user._id });
+    
+    const totalCampaigns = campaigns.length;
+    const activeCampaigns = campaigns.filter(c => c.status === 'sending').length;
+    
+    let totalSent = 0;
+    let totalOpened = 0;
+    
+    for (const campaign of campaigns) {
+      totalSent += campaign.stats.sent || 0;
+      totalOpened += campaign.stats.opened || 0;
+    }
+    
+    const openRate = totalSent > 0 ? Math.round((totalOpened / totalSent) * 100) : 0;
+    
+    res.json({
+      success: true,
+      data: {
+        totalCampaigns,
+        activeCampaigns,
+        totalSent,
+        openRate
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.getCampaign = async (req, res) => {
   try {
     const campaign = await Campaign.findOne({

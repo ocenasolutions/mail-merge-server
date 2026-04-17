@@ -5,6 +5,8 @@ const campaignController = require('../controllers/campaignController');
 
 router.use(protect);
 
+router.get('/stats', campaignController.getStats);
+
 router.route('/')
   .get(campaignController.getCampaigns)
   .post(campaignController.createCampaign);

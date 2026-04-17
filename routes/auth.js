@@ -25,7 +25,14 @@ router.get('/google/callback',
       expiresIn: process.env.JWT_EXPIRE
     });
 
-    res.redirect(`${process.env.CLIENT_URL}/auth/callback?token=${token}`);
+    // Include user data in the redirect
+    const userData = {
+      _id: req.user._id,
+      email: req.user.email,
+      name: req.user.name
+    };
+
+    res.redirect(`${process.env.CLIENT_URL}/auth/callback?token=${token}&user=${encodeURIComponent(JSON.stringify(userData))}`);
   }
 );
 
