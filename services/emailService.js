@@ -50,11 +50,12 @@ const createTransporter = async (emailConfig, user) => {
         }
       });
 
+    case 'godaddy':
     case 'smtp':
       return nodemailer.createTransport({
         host: emailConfig.config.host,
         port: emailConfig.config.port,
-        secure: emailConfig.config.secure,
+        secure: emailConfig.config.secure !== false, // Default to true for GoDaddy
         auth: {
           user: emailConfig.config.username,
           pass: emailConfig.config.password
@@ -91,6 +92,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
 
     switch (emailConfig.provider) {
       case 'gmail':
+      case 'godaddy':
       case 'smtp':
         const transporter = await createTransporter(emailConfig, user);
         
@@ -192,10 +194,11 @@ const testEmailConnection = async (emailConfig, user) => {
         await transporter.verify();
         return { success: true, message: 'Gmail connection successful' };
 
+      case 'godaddy':
       case 'smtp':
         const smtpTransporter = await createTransporter(emailConfig, user);
         await smtpTransporter.verify();
-        return { success: true, message: 'SMTP connection successful' };
+        return { success: true, message: emailConfig.provider === 'godaddy' ? 'GoDaddy SMTP connection successful' : 'SMTP connection successful' };
 
       case 'sendgrid':
         await axios.get('https://api.sendgrid.com/v3/user/profile', {
