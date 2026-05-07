@@ -33,7 +33,7 @@ router.get('/google', (req, res, next) => {
 // @route   GET /api/auth/google/callback
 // @desc    Google OAuth callback
 router.get('/google/callback',
-  passport.authenticate('google', { session: false, failureRedirect: `${process.env.CLIENT_URL}/mail-merge/login` }),
+  passport.authenticate('google', { session: false, failureRedirect: `${process.env.CLIENT_URL}/login` }),
   (req, res) => {
     const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, {
       expiresIn: process.env.JWT_EXPIRE
@@ -61,7 +61,7 @@ router.get('/google/callback',
       console.error('Error decoding state:', error);
     }
     
-    res.redirect(`${baseUrl}/mail-merge/auth/callback?token=${token}&user=${encodeURIComponent(JSON.stringify(userData))}`);
+    res.redirect(`${baseUrl}/auth/callback?token=${token}&user=${encodeURIComponent(JSON.stringify(userData))}`);
   }
 );
 
