@@ -14,44 +14,9 @@ const mergeTags = (text, data) => {
 const createTransporter = async (emailConfig, user) => {
   switch (emailConfig.provider) {
     case 'gmail':
-      // Check if we have refresh token
-      if (!user.googleRefreshToken) {
-        throw new Error('Google authentication expired. Please log out and log in again to reconnect Gmail.');
-      }
-
-      const oauth2Client = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET,
-        process.env.GOOGLE_CALLBACK_URL
-      );
-
-      oauth2Client.setCredentials({
-        access_token: user.googleAccessToken,
-        refresh_token: user.googleRefreshToken
-      });
-
-      let accessToken;
-      try {
-        const tokenResponse = await oauth2Client.getAccessToken();
-        accessToken = tokenResponse.token;
-      } catch (error) {
-        throw new Error('Failed to get Gmail access token. Please log out and log in again.');
-      }
-
-      return nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-          type: 'OAuth2',
-          user: emailConfig.config.email || user.email,
-          clientId: process.env.GOOGLE_CLIENT_ID,
-          clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-          refreshToken: user.googleRefreshToken,
-          accessToken: accessToken
-        },
-        connectionTimeout: 60000, // 60 seconds
-        greetingTimeout: 30000,
-        socketTimeout: 60000
-      });
+      // For Gmail, we'll use Gmail API directly instead of SMTP
+      // This works better with the gmail.send OAuth scope
+      return null; // We'll handle Gmail differently in sendEmail function
 
     case 'godaddy':
     case 'smtp':
@@ -137,6 +102,69 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
 
     switch (emailConfig.provider) {
       case 'gmail':
+        logger.info({ recipient }, '📤 Sending via Gmail API');
+        
+        // Check if we have refresh token
+        if (!user.googleRefreshToken) {
+          throw new Error('Google authentication expired. Please log out and log in again to reconnect Gmail.');
+        }
+
+        const oauth2Client = new google.auth.OAuth2(
+          process.env.GOOGLE_CLIENT_ID,
+          process.env.GOOGLE_CLIENT_SECRET,
+          process.env.GOOGLE_CALLBACK_URL
+        );
+
+        oauth2Client.setCredentials({
+          access_token: user.googleAccessToken,
+          refresh_token: user.googleRefreshToken
+        });
+
+        // Refresh token if needed
+        try {
+          const { credentials } = await oauth2Client.refreshAccessToken();
+          if (credentials.access_token && credentials.access_token !== user.googleAccessToken) {
+            const User = require('../models/User');
+            await User.findByIdAndUpdate(user._id, { googleAccessToken: credentials.access_token });
+            logger.info({ userId: user._id }, '🔄 Updated user access token');
+          }
+        } catch (error) {
+          logger.error({ err: error }, '❌ Failed to refresh token');
+        }
+
+        // Create Gmail API client
+        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+        // Create email message
+        const fromEmail = emailConfig.config.email || user.email;
+        const emailLines = [
+          `From: ${fromEmail}`,
+          `To: ${recipient}`,
+          `Subject: ${subject}`,
+          'MIME-Version: 1.0',
+          'Content-Type: text/html; charset=utf-8',
+          '',
+          bodyWithTracking
+        ];
+
+        const email = emailLines.join('\r\n');
+        const encodedEmail = Buffer.from(email)
+          .toString('base64')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/, '');
+
+        // Send via Gmail API
+        await gmail.users.messages.send({
+          userId: 'me',
+          requestBody: {
+            raw: encodedEmail
+          }
+        });
+
+        logger.info({ recipient }, '✅ Email sent successfully via Gmail API');
+        break;
+
       case 'godaddy':
       case 'smtp':
         logger.info({ 
@@ -268,9 +296,28 @@ const testEmailConnection = async (emailConfig, user) => {
           };
         }
 
-        const transporter = await createTransporter(emailConfig, user);
-        await transporter.verify();
-        return { success: true, message: 'Gmail connection successful' };
+        // Test using Gmail API - just check if we can refresh the token
+        const oauth2Client = new google.auth.OAuth2(
+          process.env.GOOGLE_CLIENT_ID,
+          process.env.GOOGLE_CLIENT_SECRET,
+          process.env.GOOGLE_CALLBACK_URL
+        );
+
+        oauth2Client.setCredentials({
+          access_token: user.googleAccessToken,
+          refresh_token: user.googleRefreshToken
+        });
+
+        // Try to refresh token - this validates the OAuth setup
+        try {
+          await oauth2Client.refreshAccessToken();
+          return { success: true, message: 'Gmail OAuth connection successful. Ready to send emails.' };
+        } catch (error) {
+          return { 
+            success: false, 
+            message: 'Failed to refresh Gmail token. Please log out and log in again.' 
+          };
+        }
 
       case 'godaddy':
       case 'smtp':

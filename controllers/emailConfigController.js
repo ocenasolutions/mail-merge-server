@@ -92,7 +92,11 @@ exports.testConfig = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Config not found' });
     }
 
-    const result = await testEmailConnection(config, req.user);
+    // For Gmail, we need the full user object with OAuth tokens
+    const User = require('../models/User');
+    const userWithTokens = await User.findById(req.user._id);
+
+    const result = await testEmailConnection(config, userWithTokens);
 
     if (result.success) {
       config.verified = true;

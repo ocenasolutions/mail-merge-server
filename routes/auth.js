@@ -18,6 +18,7 @@ router.get('/google', (req, res, next) => {
     origin = process.env.CLIENT_URL;
   }
   
+  // Always force consent to ensure fresh tokens with all scopes
   passport.authenticate('google', {
     scope: [
       'profile', 
@@ -26,7 +27,7 @@ router.get('/google', (req, res, next) => {
       'https://www.googleapis.com/auth/gmail.send'         // Gmail send access (secure)
     ],
     accessType: 'offline',
-    prompt: 'consent',
+    prompt: 'consent',  // Always show consent screen to get fresh refresh token
     state: Buffer.from(origin).toString('base64') // Pass origin as state
   })(req, res, next);
 });
