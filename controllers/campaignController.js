@@ -170,44 +170,77 @@ exports.previewCampaign = async (req, res) => {
 
 exports.sendCampaign = async (req, res) => {
   try {
+    console.log('📧 Send campaign request received for campaign:', req.params.id);
+    
     const campaign = await Campaign.findOne({
       _id: req.params.id,
       userId: req.user._id
     }).populate('sheetId emailConfigId');
 
     if (!campaign) {
+      console.log('❌ Campaign not found:', req.params.id);
       return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
 
+    console.log('✅ Campaign found:', {
+      id: campaign._id,
+      name: campaign.name,
+      status: campaign.status,
+      hasSheet: !!campaign.sheetId,
+      hasEmailConfig: !!campaign.emailConfigId
+    });
+
     if (campaign.status === 'sending') {
+      console.log('⚠️ Campaign already sending');
       return res.status(400).json({ success: false, message: 'Campaign already sending' });
     }
 
     if (!campaign.sheetId) {
+      console.log('❌ Sheet not found for campaign');
       return res.status(400).json({ success: false, message: 'Sheet not found for this campaign' });
     }
 
     if (!campaign.emailConfigId) {
+      console.log('❌ Email configuration not found for campaign');
       return res.status(400).json({ success: false, message: 'Email configuration not found for this campaign' });
     }
 
     const user = await User.findById(req.user._id);
     
+    console.log('👤 User details:', {
+      id: user._id,
+      email: user.email,
+      hasGoogleAccessToken: !!user.googleAccessToken,
+      hasGoogleRefreshToken: !!user.googleRefreshToken
+    });
+
     if (!user.googleAccessToken) {
+      console.log('❌ Google authentication required');
       return res.status(400).json({ success: false, message: 'Google authentication required. Please log out and log in again.' });
     }
 
+    console.log('📊 Fetching sheet data from Google Sheets...');
     const sheetData = await getSheetData(
       campaign.sheetId.sheetId,
       user.googleAccessToken,
       user.googleRefreshToken
     );
 
+    console.log('✅ Sheet data fetched:', {
+      rowCount: sheetData.rows.length,
+      headers: sheetData.headers
+    });
+
     // Create recipients
     const recipients = [];
+    let skippedCount = 0;
+    
     for (const row of sheetData.rows) {
       const email = row[campaign.emailColumn];
-      if (!email) continue;
+      if (!email) {
+        skippedCount++;
+        continue;
+      }
 
       const existing = await Recipient.findOne({
         campaignId: campaign._id,
@@ -224,8 +257,14 @@ exports.sendCampaign = async (req, res) => {
       }
     }
 
+    console.log('📋 Recipients prepared:', {
+      newRecipients: recipients.length,
+      skippedEmptyEmails: skippedCount
+    });
+
     if (recipients.length > 0) {
       await Recipient.insertMany(recipients);
+      console.log('✅ Recipients inserted into database');
     }
 
     campaign.stats.total = await Recipient.countDocuments({ campaignId: campaign._id });
@@ -234,14 +273,22 @@ exports.sendCampaign = async (req, res) => {
     campaign.startedAt = req.body.scheduledAt ? null : new Date();
     await campaign.save();
 
+    console.log('✅ Campaign updated:', {
+      status: campaign.status,
+      totalRecipients: campaign.stats.total,
+      scheduled: !!req.body.scheduledAt
+    });
+
     // Start sending if not scheduled
     if (!req.body.scheduledAt) {
+      console.log('🚀 Starting email sending process...');
       require('../services/emailSenderService').processCampaign(campaign._id);
     }
 
     res.json({ success: true, data: campaign });
   } catch (error) {
-    console.error('Send campaign error:', error);
+    console.error('❌ Send campaign error:', error);
+    console.error('Error stack:', error.stack);
     res.status(500).json({ success: false, message: error.message || 'Failed to send campaign' });
   }
 };
@@ -383,5 +430,329 @@ exports.updateSheet = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.testEmail = async (req, res) => {
+  try {
+    const { emailConfigId, testEmail } = req.body;
+    
+    if (!emailConfigId || !testEmail) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'emailConfigId and testEmail are required' 
+      });
+    }
+
+    const EmailConfig = require('../models/EmailConfig');
+    const emailConfig = await EmailConfig.findOne({
+      _id: emailConfigId,
+      userId: req.user._id
+    });
+
+    if (!emailConfig) {
+      return res.status(404).json({ success: false, message: 'Email configuration not found' });
+    }
+
+    const user = await User.findById(req.user._id);
+    const { sendEmail } = require('../services/emailService');
+    const crypto = require('crypto');
+
+    const trackingId = crypto.randomUUID();
+    const subject = 'Test Email from Mail Merge';
+    const body = `
+      <html>
+        <body>
+          <h2>Test Email</h2>
+          <p>This is a test email from your Mail Merge application.</p>
+          <p>If you received this email, your email configuration is working correctly!</p>
+          <p><strong>Provider:</strong> ${emailConfig.provider}</p>
+          <p><strong>From:</strong> ${emailConfig.config.email || user.email}</p>
+          <p><strong>Sent at:</strong> ${new Date().toLocaleString()}</p>
+        </body>
+      </html>
+    `;
+
+    console.log('🧪 Sending test email:', {
+      provider: emailConfig.provider,
+      from: emailConfig.config.email || user.email,
+      to: testEmail,
+      trackingId
+    });
+
+    const result = await sendEmail(
+      emailConfig,
+      user,
+      testEmail,
+      subject,
+      body,
+      trackingId
+    );
+
+    if (result.success) {
+      console.log('✅ Test email sent successfully');
+      res.json({ 
+        success: true, 
+        message: 'Test email sent successfully',
+        trackingId
+      });
+    } else {
+      console.log('❌ Test email failed:', result.error);
+      res.status(500).json({ 
+        success: false, 
+        message: `Failed to send test email: ${result.error}` 
+      });
+    }
+  } catch (error) {
+    console.error('❌ Test email error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.retryFailed = async (req, res) => {
+  try {
+    console.log('🔄 Retry failed recipients request for campaign:', req.params.id);
+    
+    const campaign = await Campaign.findOne({
+      _id: req.params.id,
+      userId: req.user._id
+    }).populate('sheetId emailConfigId');
+
+    if (!campaign) {
+      console.log('❌ Campaign not found:', req.params.id);
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
+    }
+
+    console.log('✅ Campaign found:', {
+      id: campaign._id,
+      name: campaign.name,
+      status: campaign.status
+    });
+
+    // Check if campaign is in a state that allows retry
+    if (campaign.status === 'sending') {
+      console.log('⚠️ Campaign is currently sending');
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Cannot retry while campaign is sending. Please pause it first.' 
+      });
+    }
+
+    if (!campaign.emailConfigId) {
+      console.log('❌ Email configuration not found for campaign');
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email configuration not found for this campaign' 
+      });
+    }
+
+    // Find all failed recipients
+    const failedRecipients = await Recipient.find({
+      campaignId: campaign._id,
+      status: 'failed'
+    });
+
+    console.log('📋 Failed recipients found:', failedRecipients.length);
+
+    if (failedRecipients.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No failed recipients to retry' 
+      });
+    }
+
+    // Reset failed recipients to pending
+    await Recipient.updateMany(
+      {
+        campaignId: campaign._id,
+        status: 'failed'
+      },
+      {
+        $set: { 
+          status: 'pending',
+          error: null,
+          sentAt: null
+        }
+      }
+    );
+
+    // Update campaign stats
+    campaign.stats.failed = 0;
+    campaign.status = 'sending';
+    campaign.startedAt = new Date();
+    await campaign.save();
+
+    console.log('✅ Failed recipients reset to pending:', failedRecipients.length);
+    console.log('🚀 Starting retry process...');
+
+    // Start sending
+    require('../services/emailSenderService').processCampaign(campaign._id);
+
+    res.json({ 
+      success: true, 
+      message: `Retrying ${failedRecipients.length} failed recipients`,
+      data: {
+        retriedCount: failedRecipients.length,
+        campaign
+      }
+    });
+  } catch (error) {
+    console.error('❌ Retry failed error:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to retry campaign' 
+    });
+  }
+};
+
+exports.retrySelected = async (req, res) => {
+  try {
+    const { recipientIds } = req.body;
+    console.log('🔄 Retry selected recipients request:', recipientIds?.length);
+
+    if (!recipientIds || !Array.isArray(recipientIds) || recipientIds.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'recipientIds array is required' 
+      });
+    }
+
+    const campaign = await Campaign.findOne({
+      _id: req.params.id,
+      userId: req.user._id
+    }).populate('emailConfigId');
+
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
+    }
+
+    if (campaign.status === 'sending') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Cannot retry while campaign is sending. Please pause it first.' 
+      });
+    }
+
+    // Reset selected recipients to pending
+    const result = await Recipient.updateMany(
+      {
+        _id: { $in: recipientIds },
+        campaignId: campaign._id,
+        status: 'failed'
+      },
+      {
+        $set: { 
+          status: 'pending',
+          error: null,
+          sentAt: null
+        }
+      }
+    );
+
+    console.log('✅ Selected recipients reset to pending:', result.modifiedCount);
+
+    // Update campaign stats
+    const failedCount = await Recipient.countDocuments({
+      campaignId: campaign._id,
+      status: 'failed'
+    });
+    campaign.stats.failed = failedCount;
+    campaign.status = 'sending';
+    await campaign.save();
+
+    // Start sending
+    require('../services/emailSenderService').processCampaign(campaign._id);
+
+    res.json({ 
+      success: true, 
+      message: `Retrying ${result.modifiedCount} selected recipients`,
+      data: {
+        retriedCount: result.modifiedCount
+      }
+    });
+  } catch (error) {
+    console.error('❌ Retry selected error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to retry selected recipients' 
+    });
+  }
+};
+
+exports.retryOne = async (req, res) => {
+  try {
+    const { recipientId } = req.body;
+    console.log('🔄 Retry one recipient request:', recipientId);
+
+    if (!recipientId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'recipientId is required' 
+      });
+    }
+
+    const campaign = await Campaign.findOne({
+      _id: req.params.id,
+      userId: req.user._id
+    }).populate('emailConfigId');
+
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
+    }
+
+    if (campaign.status === 'sending') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Cannot retry while campaign is sending. Please pause it first.' 
+      });
+    }
+
+    // Find and reset the recipient
+    const recipient = await Recipient.findOne({
+      _id: recipientId,
+      campaignId: campaign._id,
+      status: 'failed'
+    });
+
+    if (!recipient) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Failed recipient not found' 
+      });
+    }
+
+    recipient.status = 'pending';
+    recipient.error = null;
+    recipient.sentAt = null;
+    await recipient.save();
+
+    console.log('✅ Recipient reset to pending:', recipient.email);
+
+    // Update campaign stats
+    const failedCount = await Recipient.countDocuments({
+      campaignId: campaign._id,
+      status: 'failed'
+    });
+    campaign.stats.failed = failedCount;
+    campaign.status = 'sending';
+    await campaign.save();
+
+    // Start sending
+    require('../services/emailSenderService').processCampaign(campaign._id);
+
+    res.json({ 
+      success: true, 
+      message: `Retrying ${recipient.email}`,
+      data: {
+        recipient
+      }
+    });
+  } catch (error) {
+    console.error('❌ Retry one error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to retry recipient' 
+    });
   }
 };

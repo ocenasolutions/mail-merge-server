@@ -47,11 +47,22 @@ const createTransporter = async (emailConfig, user) => {
           clientSecret: process.env.GOOGLE_CLIENT_SECRET,
           refreshToken: user.googleRefreshToken,
           accessToken: accessToken
-        }
+        },
+        connectionTimeout: 60000, // 60 seconds
+        greetingTimeout: 30000,
+        socketTimeout: 60000
       });
 
     case 'godaddy':
     case 'smtp':
+      logger.info({
+        provider: emailConfig.provider,
+        host: emailConfig.config.host,
+        port: emailConfig.config.port,
+        secure: emailConfig.config.secure !== false,
+        username: emailConfig.config.username
+      }, '🔧 Creating SMTP transporter');
+
       return nodemailer.createTransport({
         host: emailConfig.config.host,
         port: emailConfig.config.port,
@@ -59,7 +70,12 @@ const createTransporter = async (emailConfig, user) => {
         auth: {
           user: emailConfig.config.username,
           pass: emailConfig.config.password
-        }
+        },
+        connectionTimeout: 60000, // 60 seconds
+        greetingTimeout: 30000,
+        socketTimeout: 60000,
+        logger: false, // Disable nodemailer's internal logging
+        debug: false
       });
 
     default:
@@ -69,6 +85,33 @@ const createTransporter = async (emailConfig, user) => {
 
 const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId) => {
   try {
+    logger.info({ 
+      recipient, 
+      trackingId,
+      provider: emailConfig.provider,
+      hasEmailConfig: !!emailConfig,
+      hasUser: !!user,
+      hasSubject: !!subject,
+      hasBody: !!body
+    }, '📧 Starting email send');
+
+    // Validate inputs
+    if (!emailConfig) {
+      throw new Error('Email configuration is missing');
+    }
+    if (!user) {
+      throw new Error('User is missing');
+    }
+    if (!recipient) {
+      throw new Error('Recipient email is missing');
+    }
+    if (!subject) {
+      throw new Error('Email subject is missing');
+    }
+    if (!body) {
+      throw new Error('Email body is missing');
+    }
+
     // Add tracking pixel with multiple fallback methods
     const trackingUrl = `${process.env.APP_URL}/track/${trackingId}`;
     
@@ -87,16 +130,27 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
     logger.info({ 
       recipient, 
       trackingUrl,
-      provider: emailConfig.provider
+      provider: emailConfig.provider,
+      emailConfigEmail: emailConfig.config?.email,
+      userEmail: user.email
     }, '📧 Sending email with tracking pixel');
 
     switch (emailConfig.provider) {
       case 'gmail':
       case 'godaddy':
       case 'smtp':
+        logger.info({ 
+          provider: emailConfig.provider,
+          recipient,
+          host: emailConfig.config?.host,
+          port: emailConfig.config?.port
+        }, '🔧 Creating transporter');
+
         const transporter = await createTransporter(emailConfig, user);
         
-        await transporter.sendMail({
+        logger.info({ recipient }, '📤 Sending via transporter');
+
+        const mailOptions = {
           from: emailConfig.config.email || user.email,
           to: recipient,
           subject,
@@ -105,10 +159,21 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             'X-Entity-Ref-ID': trackingId,
             'List-Unsubscribe': `<${process.env.APP_URL}/unsubscribe/${trackingId}>`,
           }
-        });
+        };
+
+        logger.info({ 
+          from: mailOptions.from,
+          to: mailOptions.to,
+          subject: mailOptions.subject
+        }, '📧 Mail options prepared');
+
+        await transporter.sendMail(mailOptions);
+        
+        logger.info({ recipient }, '✅ Email sent successfully via transporter');
         break;
 
       case 'sendgrid':
+        logger.info({ recipient }, '📤 Sending via SendGrid');
         await axios.post(
           'https://api.sendgrid.com/v3/mail/send',
           {
@@ -124,9 +189,11 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             }
           }
         );
+        logger.info({ recipient }, '✅ Email sent successfully via SendGrid');
         break;
 
       case 'mailgun':
+        logger.info({ recipient }, '📤 Sending via Mailgun');
         const formData = new URLSearchParams();
         formData.append('from', emailConfig.config.email);
         formData.append('to', recipient);
@@ -143,9 +210,11 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             }
           }
         );
+        logger.info({ recipient }, '✅ Email sent successfully via Mailgun');
         break;
 
       case 'brevo':
+        logger.info({ recipient }, '📤 Sending via Brevo');
         const fromName = emailConfig.config.fromName || emailConfig.config.email.split('@')[0];
         await axios.post(
           'https://api.brevo.com/v3/smtp/email',
@@ -165,15 +234,24 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             }
           }
         );
+        logger.info({ recipient }, '✅ Email sent successfully via Brevo');
         break;
 
       default:
         throw new Error('Unsupported email provider');
     }
 
+    logger.info({ recipient, provider: emailConfig.provider }, '✅ Email sent successfully');
     return { success: true };
   } catch (error) {
-    logger.error({ err: error, recipient }, 'Email send error');
+    logger.error({ 
+      err: error, 
+      recipient,
+      errorMessage: error.message,
+      errorResponse: error.response?.data,
+      errorStatus: error.response?.status,
+      provider: emailConfig?.provider
+    }, '❌ Email send error');
     return { success: false, error: error.message };
   }
 };

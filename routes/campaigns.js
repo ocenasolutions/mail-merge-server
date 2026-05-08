@@ -20,7 +20,11 @@ router.post('/:id/preview', campaignController.previewCampaign);
 router.post('/:id/send', campaignController.sendCampaign);
 router.post('/:id/pause', campaignController.pauseCampaign);
 router.post('/:id/resume', campaignController.resumeCampaign);
+router.post('/:id/retry-failed', campaignController.retryFailed);
+router.post('/:id/retry-selected', campaignController.retrySelected);
+router.post('/:id/retry-one', campaignController.retryOne);
 router.post('/:id/update-sheet', campaignController.updateSheet);
+router.post('/test-email', campaignController.testEmail);
 router.get('/:id/recipients', campaignController.getRecipients);
 
 module.exports = router;

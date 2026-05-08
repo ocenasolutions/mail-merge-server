@@ -22,7 +22,8 @@ router.get('/google', (req, res, next) => {
     scope: [
       'profile', 
       'email', 
-      'https://www.googleapis.com/auth/spreadsheets'  // Changed from .readonly to full access
+      'https://www.googleapis.com/auth/spreadsheets',     // Google Sheets access
+      'https://www.googleapis.com/auth/gmail.send'         // Gmail send access (secure)
     ],
     accessType: 'offline',
     prompt: 'consent',

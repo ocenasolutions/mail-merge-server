@@ -68,14 +68,52 @@ const updateGoogleSheetStatus = async (campaign, user) => {
 
 const processCampaign = async (campaignId) => {
   try {
+    logger.info({ campaignId }, '🚀 Starting campaign processing');
+    
     const campaign = await Campaign.findById(campaignId)
       .populate('emailConfigId');
 
-    if (!campaign || campaign.status !== 'sending') {
+    if (!campaign) {
+      logger.error({ campaignId }, '❌ Campaign not found');
+      return;
+    }
+
+    if (campaign.status !== 'sending') {
+      logger.warn({ campaignId, status: campaign.status }, '⚠️ Campaign not in sending status');
+      return;
+    }
+
+    logger.info({ 
+      campaignId: campaign._id,
+      campaignName: campaign.name,
+      emailConfigId: campaign.emailConfigId?._id,
+      emailConfigProvider: campaign.emailConfigId?.provider
+    }, '📧 Campaign details loaded');
+
+    if (!campaign.emailConfigId) {
+      logger.error({ campaignId }, '❌ Email config not found for campaign');
+      campaign.status = 'failed';
+      await campaign.save();
       return;
     }
 
     const user = await User.findById(campaign.userId);
+    
+    if (!user) {
+      logger.error({ campaignId, userId: campaign.userId }, '❌ User not found');
+      campaign.status = 'failed';
+      await campaign.save();
+      return;
+    }
+
+    logger.info({ 
+      userId: user._id,
+      userEmail: user.email,
+      hasGoogleAccessToken: !!user.googleAccessToken,
+      hasGoogleRefreshToken: !!user.googleRefreshToken,
+      emailsPerMinute: user.settings.emailsPerMinute
+    }, '👤 User details loaded');
+
     const rateLimiter = getRateLimiter(
       user._id.toString(),
       user.settings.emailsPerMinute
@@ -86,15 +124,31 @@ const processCampaign = async (campaignId) => {
       status: 'pending'
     }).limit(100);
 
+    logger.info({ 
+      campaignId,
+      pendingRecipients: recipients.length,
+      totalRecipients: campaign.stats.total
+    }, '📋 Recipients loaded');
+
     if (recipients.length === 0) {
       campaign.status = 'completed';
       campaign.completedAt = new Date();
       await campaign.save();
+      logger.info({ campaignId }, '✅ Campaign completed - no more recipients');
       return;
     }
 
+    let processedCount = 0;
+    let successCount = 0;
+    let failedCount = 0;
+
     for (const recipient of recipients) {
       try {
+        logger.info({ 
+          recipientEmail: recipient.email,
+          trackingId: recipient.trackingId
+        }, '📤 Processing recipient');
+
         await rateLimiter.consume(user._id.toString());
 
         // Convert Map to plain object for merge tags
@@ -102,13 +156,19 @@ const processCampaign = async (campaignId) => {
           ? Object.fromEntries(recipient.mergeData)
           : recipient.mergeData;
 
-        console.log('Merge data for', recipient.email, ':', mergeData);
+        logger.info({ 
+          recipientEmail: recipient.email,
+          mergeDataKeys: Object.keys(mergeData || {})
+        }, '🔄 Merge data prepared');
 
         const subject = mergeTags(campaign.subject, mergeData);
         const body = mergeTags(campaign.body, mergeData);
 
-        console.log('Merged subject:', subject);
-        console.log('Merged body preview:', body.substring(0, 100));
+        logger.info({ 
+          recipientEmail: recipient.email,
+          subject: subject,
+          bodyLength: body?.length || 0
+        }, '📝 Email content merged');
 
         const result = await sendEmail(
           campaign.emailConfigId,
@@ -119,26 +179,49 @@ const processCampaign = async (campaignId) => {
           recipient.trackingId
         );
 
+        logger.info({ 
+          recipientEmail: recipient.email,
+          success: result.success,
+          error: result.error
+        }, result.success ? '✅ Email sent successfully' : '❌ Email send failed');
+
         if (result.success) {
           recipient.status = 'sent';
           recipient.sentAt = new Date();
           campaign.stats.sent += 1;
+          successCount++;
         } else {
           recipient.status = 'failed';
           recipient.error = result.error;
           campaign.stats.failed += 1;
+          failedCount++;
         }
 
         await recipient.save();
+        processedCount++;
       } catch (error) {
+        logger.error({ 
+          err: error,
+          recipientEmail: recipient.email,
+          errorMessage: error.message,
+          msBeforeNext: error.msBeforeNext
+        }, '❌ Error processing recipient');
+
         if (error.msBeforeNext) {
           // Rate limit hit, wait and retry
+          logger.warn({ 
+            msBeforeNext: error.msBeforeNext,
+            processedCount,
+            successCount,
+            failedCount
+          }, '⏸️ Rate limit hit, scheduling retry');
           setTimeout(() => processCampaign(campaignId), error.msBeforeNext);
           break;
         } else {
           recipient.status = 'failed';
           recipient.error = error.message;
           campaign.stats.failed += 1;
+          failedCount++;
           await recipient.save();
         }
       }
@@ -146,13 +229,28 @@ const processCampaign = async (campaignId) => {
 
     await campaign.save();
 
+    logger.info({ 
+      campaignId,
+      processedCount,
+      successCount,
+      failedCount,
+      totalSent: campaign.stats.sent,
+      totalFailed: campaign.stats.failed
+    }, '📊 Batch processing complete');
+
     // Continue processing if there are more recipients
     const remaining = await Recipient.countDocuments({
       campaignId: campaign._id,
       status: 'pending'
     });
 
+    logger.info({ 
+      campaignId,
+      remainingRecipients: remaining
+    }, '📈 Checking for more recipients');
+
     if (remaining > 0 && campaign.status === 'sending') {
+      logger.info({ campaignId, remaining }, '⏭️ Scheduling next batch');
       setTimeout(() => processCampaign(campaignId), 1000);
     } else if (remaining === 0) {
       campaign.status = 'completed';
@@ -169,12 +267,28 @@ const processCampaign = async (campaignId) => {
       await updateGoogleSheetStatus(campaign, user);
     }
   } catch (error) {
-    logger.error({ err: error, campaignId }, 'Campaign processing error');
-    const campaign = await Campaign.findById(campaignId);
-    if (campaign) {
-      campaign.status = 'failed';
-      await campaign.save();
-      logger.error({ campaignId: campaign._id, campaignName: campaign.name }, '❌ Campaign failed');
+    logger.error({ 
+      err: error, 
+      campaignId,
+      errorMessage: error.message,
+      errorStack: error.stack
+    }, '❌ Campaign processing error');
+    
+    try {
+      const campaign = await Campaign.findById(campaignId);
+      if (campaign) {
+        campaign.status = 'failed';
+        await campaign.save();
+        logger.error({ 
+          campaignId: campaign._id, 
+          campaignName: campaign.name 
+        }, '❌ Campaign marked as failed');
+      }
+    } catch (saveError) {
+      logger.error({ 
+        err: saveError,
+        campaignId
+      }, '❌ Failed to mark campaign as failed');
     }
   }
 };
