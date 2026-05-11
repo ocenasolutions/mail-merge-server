@@ -8,15 +8,19 @@ const { protect } = require('../middleware/auth');
 // @desc    Initiate Google OAuth
 router.get('/google', (req, res, next) => {
   // Get the origin from referer header or query parameter
-  let origin = req.query.origin || req.headers.referer || process.env.CLIENT_URL;
+  // FRONTEND_URL takes precedence over CLIENT_URL for clarity
+  const defaultOrigin = process.env.FRONTEND_URL || process.env.CLIENT_URL;
+  let origin = req.query.origin || req.headers.referer || defaultOrigin;
   
   // Clean up the origin to get just the base URL
   try {
     const url = new URL(origin);
     origin = `${url.protocol}//${url.host}`;
   } catch (error) {
-    origin = process.env.CLIENT_URL;
+    origin = defaultOrigin;
   }
+  
+  console.log('Initiating OAuth with origin:', origin);
   
   // Always force consent to ensure fresh tokens with all scopes
   passport.authenticate('google', {
@@ -35,7 +39,7 @@ router.get('/google', (req, res, next) => {
 // @route   GET /api/auth/google/callback
 // @desc    Google OAuth callback
 router.get('/google/callback',
-  passport.authenticate('google', { session: false, failureRedirect: `${process.env.CLIENT_URL}/login` }),
+  passport.authenticate('google', { session: false, failureRedirect: `${process.env.FRONTEND_URL || process.env.CLIENT_URL}/login` }),
   (req, res) => {
     const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, {
       expiresIn: process.env.JWT_EXPIRE
@@ -48,22 +52,27 @@ router.get('/google/callback',
       name: req.user.name
     };
 
-    // Determine the redirect URL based on state parameter
-    let baseUrl = process.env.CLIENT_URL;
+    // Determine the redirect URL based on state parameter or environment variable
+    // FRONTEND_URL takes precedence over CLIENT_URL for clarity
+    let frontendUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL;
     
     try {
-      // Get origin from state parameter
+      // Get origin from state parameter if provided
       if (req.query.state) {
         const decodedOrigin = Buffer.from(req.query.state, 'base64').toString('utf-8');
         if (decodedOrigin.startsWith('http')) {
-          baseUrl = decodedOrigin;
+          frontendUrl = decodedOrigin;
         }
       }
     } catch (error) {
       console.error('Error decoding state:', error);
     }
+
+    console.log('Redirecting to frontend:', frontendUrl);
+    console.log('Full redirect URL:', `${frontendUrl}/auth/callback`);
     
-    res.redirect(`${baseUrl}/auth/callback?token=${token}&user=${encodeURIComponent(JSON.stringify(userData))}`);
+    // IMPORTANT: Redirect to FRONTEND, not backend
+    res.redirect(`${frontendUrl}/auth/callback?token=${token}&user=${encodeURIComponent(JSON.stringify(userData))}`);
   }
 );
 
