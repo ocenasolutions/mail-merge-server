@@ -122,7 +122,7 @@ const processCampaign = async (campaignId) => {
     const recipients = await Recipient.find({
       campaignId: campaign._id,
       status: 'pending'
-    }).limit(100);
+    }).limit(500); // Increased from 100 to 500 for faster processing
 
     logger.info({ 
       campaignId,
@@ -142,14 +142,21 @@ const processCampaign = async (campaignId) => {
     let successCount = 0;
     let failedCount = 0;
 
-    for (const recipient of recipients) {
+    // Process emails in parallel for better performance
+    const emailPromises = recipients.map(async (recipient) => {
       try {
         logger.info({ 
           recipientEmail: recipient.email,
           trackingId: recipient.trackingId
         }, '📤 Processing recipient');
 
-        await rateLimiter.consume(user._id.toString());
+        // Rate limiting - only consume if needed
+        try {
+          await rateLimiter.consume(user._id.toString());
+        } catch (rateLimitError) {
+          // If rate limit hit, throw to retry later
+          throw rateLimitError;
+        }
 
         // Convert Map to plain object for merge tags
         const mergeData = recipient.mergeData instanceof Map 
@@ -199,6 +206,8 @@ const processCampaign = async (campaignId) => {
 
         await recipient.save();
         processedCount++;
+        
+        return { success: result.success, recipient };
       } catch (error) {
         logger.error({ 
           err: error,
@@ -208,22 +217,37 @@ const processCampaign = async (campaignId) => {
         }, '❌ Error processing recipient');
 
         if (error.msBeforeNext) {
-          // Rate limit hit, wait and retry
-          logger.warn({ 
-            msBeforeNext: error.msBeforeNext,
-            processedCount,
-            successCount,
-            failedCount
-          }, '⏸️ Rate limit hit, scheduling retry');
-          setTimeout(() => processCampaign(campaignId), error.msBeforeNext);
-          break;
+          // Rate limit hit, will retry later
+          throw error;
         } else {
           recipient.status = 'failed';
           recipient.error = error.message;
           campaign.stats.failed += 1;
           failedCount++;
           await recipient.save();
+          processedCount++;
+          
+          return { success: false, recipient, error };
         }
+      }
+    });
+
+    // Wait for all emails to be processed
+    try {
+      await Promise.all(emailPromises);
+    } catch (rateLimitError) {
+      // If rate limit hit during parallel processing
+      if (rateLimitError.msBeforeNext) {
+        logger.warn({ 
+          msBeforeNext: rateLimitError.msBeforeNext,
+          processedCount,
+          successCount,
+          failedCount
+        }, '⏸️ Rate limit hit, scheduling retry');
+        
+        await campaign.save();
+        setTimeout(() => processCampaign(campaignId), rateLimitError.msBeforeNext);
+        return;
       }
     }
 
@@ -251,7 +275,8 @@ const processCampaign = async (campaignId) => {
 
     if (remaining > 0 && campaign.status === 'sending') {
       logger.info({ campaignId, remaining }, '⏭️ Scheduling next batch');
-      setTimeout(() => processCampaign(campaignId), 1000);
+      // Reduced delay from 100ms to 10ms for faster processing
+      setTimeout(() => processCampaign(campaignId), 10);
     } else if (remaining === 0) {
       campaign.status = 'completed';
       campaign.completedAt = new Date();

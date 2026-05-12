@@ -14,6 +14,7 @@ router.route('/:id')
   .put(emailConfigController.updateConfig)
   .delete(emailConfigController.deleteConfig);
 
+router.post('/:id/test-connection', emailConfigController.testConnection);
 router.post('/:id/test', emailConfigController.testConfig);
 
 module.exports = router;
