@@ -152,6 +152,53 @@ exports.trackOpen = async (req, res) => {
   }
 };
 
+exports.trackClick = async (req, res) => {
+  try {
+    const { trackingId } = req.params;
+    const targetUrl = req.query.url;
+
+    if (!targetUrl) {
+      return res.status(400).send('Missing target URL');
+    }
+
+    const recipient = await Recipient.findOne({ trackingId });
+    if (!recipient) {
+      return res.redirect(targetUrl);
+    }
+
+    let tracking = await Tracking.findOne({ recipientId: recipient._id });
+    if (!tracking) {
+      tracking = await Tracking.create({
+        recipientId: recipient._id,
+        campaignId: recipient.campaignId,
+        opens: [],
+        clicks: []
+      });
+    }
+
+    const now = new Date();
+    tracking.clicks.push({
+      url: targetUrl,
+      timestamp: now,
+      userAgent: req.headers['user-agent'] || '',
+      ip: req.ip
+    });
+    tracking.clickCount += 1;
+    await tracking.save();
+
+    const campaign = await Campaign.findById(recipient.campaignId);
+    if (campaign && tracking.clickCount === 1) {
+      campaign.stats.clicked += 1;
+      await campaign.save();
+    }
+
+    return res.redirect(targetUrl);
+  } catch (error) {
+    logger.error({ err: error, trackingId: req.params.trackingId }, 'Click tracking error');
+    return res.status(500).send('Error');
+  }
+};
+
 exports.sendgridWebhook = async (req, res) => {
   try {
     const events = req.body;

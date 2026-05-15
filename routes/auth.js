@@ -85,6 +85,33 @@ router.get('/me', protect, async (req, res) => {
   });
 });
 
+router.put('/me/settings', protect, async (req, res) => {
+  try {
+    const settingsPatch = req.body?.settings || {};
+    const nextSettings = {
+      ...req.user.settings?.toObject?.(),
+      ...settingsPatch,
+      signature: {
+        ...(req.user.settings?.signature || {}),
+        ...(settingsPatch.signature || {})
+      }
+    };
+
+    req.user.settings = nextSettings;
+    await req.user.save();
+
+    res.json({
+      success: true,
+      data: req.user
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
 // @route   POST /api/auth/logout
 // @desc    Logout user
 router.post('/logout', protect, (req, res) => {

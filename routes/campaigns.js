@@ -17,6 +17,7 @@ router.route('/:id')
   .delete(campaignController.deleteCampaign);
 
 router.post('/:id/preview', campaignController.previewCampaign);
+router.post('/ai-draft', campaignController.generateAiDraft);
 router.post('/:id/send', campaignController.sendCampaign);
 router.post('/:id/pause', campaignController.pauseCampaign);
 router.post('/:id/resume', campaignController.resumeCampaign);

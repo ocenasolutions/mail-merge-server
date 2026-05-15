@@ -8,5 +8,6 @@ router.use(protect);
 router.get('/dashboard', analyticsController.getDashboardStats);
 router.get('/campaigns/:id/stats', analyticsController.getCampaignStats);
 router.get('/recent-activity', analyticsController.getRecentActivity);
+router.get('/recent-opens', analyticsController.getRecentOpens);
 
 module.exports = router;

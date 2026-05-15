@@ -27,6 +27,16 @@ const userSchema = new mongoose.Schema({
     emailsPerMinute: {
       type: Number,
       default: 50
+    },
+    signature: {
+      enabled: {
+        type: Boolean,
+        default: false
+      },
+      html: {
+        type: String,
+        default: ''
+      }
     }
   }
 }, {

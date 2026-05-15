@@ -2,12 +2,86 @@ const nodemailer = require('nodemailer');
 const axios = require('axios');
 const { google } = require('googleapis');
 const logger = require('../utils/logger');
+const { appendSentMessage } = require('./mailboxService');
 
 const mergeTags = (text, data) => {
   if (!text) return text;
-  
-  return text.replace(/\{\{(\w+)\}\}/g, (match, key) => {
-    return data[key] || match;
+
+  const mergeData = data instanceof Map ? Object.fromEntries(data) : (data || {});
+  const normalizedData = Object.entries(mergeData).reduce((acc, [key, value]) => {
+    acc[key] = value;
+    acc[key.toLowerCase()] = value;
+    acc[key.replace(/[\s_]+/g, '').toLowerCase()] = value;
+    return acc;
+  }, {});
+
+  return text.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (match, rawKey) => {
+    const key = rawKey.trim();
+    const normalizedKey = key.replace(/[\s_]+/g, '').toLowerCase();
+    const exact = mergeData[key];
+    const lower = normalizedData[key.toLowerCase()];
+    const normalized = normalizedData[normalizedKey];
+    const resolved = exact ?? lower ?? normalized;
+    return resolved !== undefined && resolved !== null && resolved !== '' ? resolved : match;
+  });
+};
+
+const hasHtml = (value) => /<\/?[a-z][\s\S]*>/i.test(value);
+const hasBlockHtml = (value) => /<(p|div|ul|ol|li|table|thead|tbody|tr|td|th|h[1-6]|blockquote|br)\b/i.test(value);
+
+const escapeHtml = (value) => value
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
+const decodeHtmlEntities = (value) => value
+  .replace(/&lt;/gi, '<')
+  .replace(/&gt;/gi, '>')
+  .replace(/&quot;/gi, '"')
+  .replace(/&#39;/gi, '\'')
+  .replace(/&amp;/gi, '&');
+
+const normalizeEmailBody = (body) => {
+  if (!body) return body;
+  const decodedBody = decodeHtmlEntities(body);
+
+  if (hasHtml(decodedBody) && hasBlockHtml(decodedBody)) {
+    return decodedBody;
+  }
+
+  if (hasHtml(decodedBody)) {
+    return decodedBody
+      .split(/\r?\n\r?\n+/)
+      .map((paragraph) => paragraph.trim())
+      .filter(Boolean)
+      .map((paragraph) => `<p>${paragraph.replace(/\r?\n/g, '<br>')}</p>`)
+      .join('');
+  }
+
+  return escapeHtml(decodedBody)
+    .split(/\r?\n\r?\n+/)
+    .map((paragraph) => `<p>${paragraph.replace(/\r?\n/g, '<br>')}</p>`)
+    .join('');
+};
+
+const escapeAttribute = (value) => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/"/g, '&quot;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;');
+
+const rewriteTrackedLinks = (html, trackingId, enabled) => {
+  if (!enabled || !html) return html;
+  const baseUrl = process.env.APP_URL;
+
+  return html.replace(/<a\b([^>]*?)href="([^"]+)"([^>]*)>/gi, (match, before, href, after) => {
+    const trimmedHref = href.trim();
+    if (!/^https?:\/\//i.test(trimmedHref)) return match;
+
+    const redirectUrl = `${baseUrl}/track/click/${trackingId}?url=${encodeURIComponent(trimmedHref)}`;
+    return `<a${before}href="${escapeAttribute(redirectUrl)}"${after}>`;
   });
 };
 
@@ -19,6 +93,7 @@ const createTransporter = async (emailConfig, user) => {
       return null; // We'll handle Gmail differently in sendEmail function
 
     case 'godaddy':
+    case 'hostinger':
     case 'smtp':
       logger.info({
         provider: emailConfig.provider,
@@ -48,11 +123,13 @@ const createTransporter = async (emailConfig, user) => {
   }
 };
 
-const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId) => {
+const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId, options = {}) => {
   try {
+    const trackingEnabled = options.trackingEnabled !== false;
     logger.info({ 
       recipient, 
       trackingId,
+      trackingEnabled,
       provider: emailConfig.provider,
       hasEmailConfig: !!emailConfig,
       hasUser: !!user,
@@ -77,6 +154,8 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
       throw new Error('Email body is missing');
     }
 
+    const normalizedBody = normalizeEmailBody(body);
+
     // Add tracking pixel with multiple fallback methods
     const trackingUrl = `${process.env.APP_URL}/track/${trackingId}`;
     
@@ -90,7 +169,10 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
     const trackingStyle = `<table cellpadding="0" cellspacing="0" border="0" style="width:1px;height:1px;"><tr><td style="background:url('${trackingUrl}') no-repeat;width:1px;height:1px;"></td></tr></table>`;
     
     // Add all tracking methods + optional view in browser link
-    const bodyWithTracking = body + trackingPixel + trackingDiv + trackingStyle;
+    const trackingMarkup = trackingEnabled
+      ? trackingPixel + trackingDiv + trackingStyle
+      : '';
+    const bodyWithTracking = rewriteTrackedLinks(normalizedBody + trackingMarkup, trackingId, trackingEnabled);
     
     logger.info({ 
       recipient, 
@@ -166,6 +248,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
         break;
 
       case 'godaddy':
+      case 'hostinger':
       case 'smtp':
         logger.info({ 
           provider: emailConfig.provider,
@@ -196,6 +279,18 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
         }, '📧 Mail options prepared');
 
         await transporter.sendMail(mailOptions);
+
+        try {
+          await appendSentMessage(emailConfig, user, {
+            to: recipient,
+            subject,
+            html: bodyWithTracking,
+            from: mailOptions.from,
+            date: new Date()
+          });
+        } catch (appendError) {
+          logger.warn({ err: appendError, provider: emailConfig.provider, recipient }, 'Could not append sent message to IMAP Sent folder');
+        }
         
         logger.info({ recipient }, '✅ Email sent successfully via transporter');
         break;
@@ -320,10 +415,19 @@ const testEmailConnection = async (emailConfig, user) => {
         }
 
       case 'godaddy':
+      case 'hostinger':
       case 'smtp':
         const smtpTransporter = await createTransporter(emailConfig, user);
         await smtpTransporter.verify();
-        return { success: true, message: emailConfig.provider === 'godaddy' ? 'GoDaddy SMTP connection successful' : 'SMTP connection successful' };
+        return {
+          success: true,
+          message:
+            emailConfig.provider === 'godaddy'
+              ? 'GoDaddy SMTP connection successful'
+              : emailConfig.provider === 'hostinger'
+                ? 'Hostinger SMTP connection successful'
+                : 'SMTP connection successful'
+        };
 
       case 'sendgrid':
         await axios.get('https://api.sendgrid.com/v3/user/profile', {

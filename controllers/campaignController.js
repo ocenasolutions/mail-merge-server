@@ -5,6 +5,7 @@ const User = require('../models/User');
 const { getSheetData } = require('../services/googleSheetsService');
 const { mergeTags, sendEmail } = require('../services/emailService');
 const crypto = require('crypto');
+const axios = require('axios');
 
 exports.getCampaigns = async (req, res) => {
   try {
@@ -506,6 +507,90 @@ exports.testEmail = async (req, res) => {
   } catch (error) {
     console.error('❌ Test email error:', error);
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.generateAiDraft = async (req, res) => {
+  try {
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(400).json({ success: false, message: 'GROQ_API_KEY is not configured on the server' });
+    }
+
+    const {
+      purpose = '',
+      audience = '',
+      tone = 'professional',
+      cta = '',
+      signature = 'Thanks,\nYour Team'
+    } = req.body || {};
+
+    if (!purpose.trim()) {
+      return res.status(400).json({ success: false, message: 'purpose is required' });
+    }
+
+    const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    const stopToken = '###END###';
+    const systemPrompt = [
+      'You write outbound email drafts for mail merge campaigns.',
+      'Return only valid email HTML using <p>, <strong>, <ul>, <li>, and <br>.',
+      'Never include markdown fences, explanations, notes, subjects, or commentary.',
+      'Keep the draft concise and usable.',
+      'Use merge tags exactly as provided, especially {{name}} and {{company}} when relevant.',
+      'Do not invent unsupported merge tags.',
+      `End the response with ${stopToken}`
+    ].join(' ');
+
+    const userPrompt = [
+      `Purpose: ${purpose}`,
+      `Audience: ${audience || 'General business recipient'}`,
+      `Tone: ${tone}`,
+      `Call to action: ${cta || 'Ask for a short reply or meeting.'}`,
+      `Signature:\n${signature}`,
+      'Write a complete email body that starts with a greeting to {{name}} and is appropriate for mail merge.',
+      `Append ${stopToken} at the very end.`
+    ].join('\n');
+
+    const response = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model,
+        temperature: 0.4,
+        max_completion_tokens: 700,
+        stop: [stopToken],
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const body = response.data?.choices?.[0]?.message?.content?.trim();
+
+    if (!body) {
+      return res.status(500).json({ success: false, message: 'Groq returned an empty draft' });
+    }
+
+    const subject = `${purpose} for {{company}}`;
+
+    res.json({
+      success: true,
+      data: {
+        model,
+        subject,
+        body
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.response?.data?.error?.message || error.message || 'Failed to generate AI draft'
+    });
   }
 };
 

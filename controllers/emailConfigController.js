@@ -1,10 +1,11 @@
 const EmailConfig = require('../models/EmailConfig');
 const { testEmailConnection } = require('../services/emailService');
+const { listMailboxes, listMessages, getMessageDetail, supportsMailbox } = require('../services/mailboxService');
 
 exports.getConfigs = async (req, res) => {
   try {
     const configs = await EmailConfig.find({ userId: req.user._id })
-      .select('-config.password -config.apiKey');
+      .select('-config.password -config.apiKey -config.imapPassword');
     
     res.json({ success: true, data: configs });
   } catch (error) {
@@ -17,7 +18,7 @@ exports.getConfig = async (req, res) => {
     const config = await EmailConfig.findOne({
       _id: req.params.id,
       userId: req.user._id
-    }).select('-config.password -config.apiKey');
+    }).select('-config.password -config.apiKey -config.imapPassword');
 
     if (!config) {
       return res.status(404).json({ success: false, message: 'Config not found' });
@@ -39,6 +40,7 @@ exports.createConfig = async (req, res) => {
     // Remove sensitive data from response
     config.config.password = undefined;
     config.config.apiKey = undefined;
+    config.config.imapPassword = undefined;
 
     res.status(201).json({ success: true, data: config });
   } catch (error) {
@@ -52,7 +54,7 @@ exports.updateConfig = async (req, res) => {
       { _id: req.params.id, userId: req.user._id },
       req.body,
       { new: true, runValidators: true }
-    ).select('-config.password -config.apiKey');
+    ).select('-config.password -config.apiKey -config.imapPassword');
 
     if (!config) {
       return res.status(404).json({ success: false, message: 'Config not found' });
@@ -61,6 +63,91 @@ exports.updateConfig = async (req, res) => {
     res.json({ success: true, data: config });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+exports.getMailboxes = async (req, res) => {
+  try {
+    const config = await EmailConfig.findOne({
+      _id: req.params.id,
+      userId: req.user._id
+    });
+
+    if (!config) {
+      return res.status(404).json({ success: false, message: 'Config not found' });
+    }
+
+    if (!supportsMailbox(config)) {
+      return res.status(400).json({ success: false, message: 'Mailbox sync is not supported for this provider' });
+    }
+
+    const User = require('../models/User');
+    const userWithTokens = await User.findById(req.user._id);
+    const mailboxes = await listMailboxes(config, userWithTokens);
+
+    res.json({ success: true, data: mailboxes });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getMessages = async (req, res) => {
+  try {
+    const config = await EmailConfig.findOne({
+      _id: req.params.id,
+      userId: req.user._id
+    });
+
+    if (!config) {
+      return res.status(404).json({ success: false, message: 'Config not found' });
+    }
+
+    if (!supportsMailbox(config)) {
+      return res.status(400).json({ success: false, message: 'Mailbox sync is not supported for this provider' });
+    }
+
+    const User = require('../models/User');
+    const userWithTokens = await User.findById(req.user._id);
+    const folder = req.query.folder === 'sent' ? 'sent' : 'inbox';
+    const limit = Math.min(parseInt(req.query.limit, 10) || 10, 100);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const data = await listMessages(config, userWithTokens, { folder, limit, offset });
+
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getMessageDetail = async (req, res) => {
+  try {
+    const config = await EmailConfig.findOne({
+      _id: req.params.id,
+      userId: req.user._id
+    });
+
+    if (!config) {
+      return res.status(404).json({ success: false, message: 'Config not found' });
+    }
+
+    if (!supportsMailbox(config)) {
+      return res.status(400).json({ success: false, message: 'Mailbox sync is not supported for this provider' });
+    }
+
+    const User = require('../models/User');
+    const userWithTokens = await User.findById(req.user._id);
+    const folder = req.query.folder === 'sent' ? 'sent' : 'inbox';
+    const uid = parseInt(req.params.uid, 10);
+
+    if (!uid) {
+      return res.status(400).json({ success: false, message: 'Valid message uid is required' });
+    }
+
+    const data = await getMessageDetail(config, userWithTokens, { folder, uid });
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 

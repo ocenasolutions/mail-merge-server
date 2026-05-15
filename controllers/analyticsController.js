@@ -103,3 +103,40 @@ exports.getRecentActivity = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+exports.getRecentOpens = async (req, res) => {
+  try {
+    const campaigns = await Campaign.find({ userId: req.user._id }).select('_id name');
+    const campaignIds = campaigns.map((campaign) => campaign._id);
+    const campaignMap = new Map(campaigns.map((campaign) => [campaign._id.toString(), campaign.name]));
+
+    const trackingDocs = await Tracking.find({ campaignId: { $in: campaignIds } })
+      .sort('-lastOpenedAt')
+      .limit(50);
+
+    const recipientIds = trackingDocs.map((doc) => doc.recipientId);
+    const recipients = await Recipient.find({ _id: { $in: recipientIds } }).select('email campaignId');
+    const recipientMap = new Map(recipients.map((recipient) => [recipient._id.toString(), recipient]));
+
+    const recentOpens = trackingDocs
+      .filter((doc) => doc.openCount > 0)
+      .map((doc) => {
+        const recipient = recipientMap.get(doc.recipientId.toString());
+        return {
+          trackingId: doc._id,
+          email: recipient?.email || 'Unknown recipient',
+          campaignId: recipient?.campaignId || doc.campaignId,
+          campaignName: campaignMap.get(doc.campaignId.toString()) || 'Campaign',
+          openCount: doc.openCount,
+          firstOpenedAt: doc.firstOpenedAt,
+          lastOpenedAt: doc.lastOpenedAt
+        };
+      })
+      .sort((a, b) => new Date(b.lastOpenedAt).getTime() - new Date(a.lastOpenedAt).getTime())
+      .slice(0, 25);
+
+    res.json({ success: true, data: recentOpens });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};

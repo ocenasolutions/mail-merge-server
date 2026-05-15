@@ -169,7 +169,10 @@ const processCampaign = async (campaignId) => {
         }, '🔄 Merge data prepared');
 
         const subject = mergeTags(campaign.subject, mergeData);
-        const body = mergeTags(campaign.body, mergeData);
+        let body = mergeTags(campaign.body, mergeData);
+        if (campaign.useSignature !== false && user.settings?.signature?.enabled && user.settings?.signature?.html) {
+          body = `${body}${user.settings.signature.html}`;
+        }
 
         logger.info({ 
           recipientEmail: recipient.email,
@@ -183,7 +186,8 @@ const processCampaign = async (campaignId) => {
           recipient.email,
           subject,
           body,
-          recipient.trackingId
+          recipient.trackingId,
+          { trackingEnabled: campaign.trackingEnabled !== false }
         );
 
         logger.info({ 

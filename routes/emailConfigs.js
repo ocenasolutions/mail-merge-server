@@ -16,5 +16,8 @@ router.route('/:id')
 
 router.post('/:id/test-connection', emailConfigController.testConnection);
 router.post('/:id/test', emailConfigController.testConfig);
+router.get('/:id/mailboxes', emailConfigController.getMailboxes);
+router.get('/:id/messages', emailConfigController.getMessages);
+router.get('/:id/messages/:uid', emailConfigController.getMessageDetail);
 
 module.exports = router;

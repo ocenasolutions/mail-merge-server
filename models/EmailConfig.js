@@ -13,7 +13,7 @@ const emailConfigSchema = new mongoose.Schema({
   },
   provider: {
     type: String,
-    enum: ['gmail', 'godaddy', 'smtp', 'sendgrid', 'mailgun', 'brevo'],
+    enum: ['gmail', 'godaddy', 'hostinger', 'smtp', 'sendgrid', 'mailgun', 'brevo'],
     required: true
   },
   config: {
@@ -27,6 +27,18 @@ const emailConfigSchema = new mongoose.Schema({
       set: encrypt,
       get: decrypt
     },
+    // For IMAP/mailbox sync
+    imapHost: String,
+    imapPort: Number,
+    imapSecure: Boolean,
+    imapUsername: String,
+    imapPassword: {
+      type: String,
+      set: encrypt,
+      get: decrypt
+    },
+    inboxPath: String,
+    sentPath: String,
     // For SendGrid/Mailgun/Brevo
     apiKey: {
       type: String,
