@@ -28,28 +28,43 @@ app.use(pinoHttp({
 app.use(helmet());
 
 // CORS configuration to support multiple origins
+const normalizeOrigin = (value) => {
+  if (!value) return null;
+
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}`;
+  } catch (error) {
+    return String(value).replace(/\/$/, '');
+  }
+};
+
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
-  'https://aischool.com',
-  'https://mail-merger2.netlify.app',
-  process.env.CLIENT_URL
-].filter(Boolean);
+  'https://emaildropp.netlify.app',
+  'https://aischcool.com',
+  process.env.CLIENT_URL,
+  process.env.FRONTEND_URL,
+  ...(process.env.ADDITIONAL_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+]
+  .map(normalizeOrigin)
+  .filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-    
-    // Check if the origin is in the allowed list or matches the pattern
-    const isAllowed = allowedOrigins.some(allowed => 
-      origin === allowed || origin.startsWith(allowed)
-    );
-    
+
+    const normalizedOrigin = normalizeOrigin(origin);
+    const isAllowed = allowedOrigins.includes(normalizedOrigin);
+
     if (isAllowed) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      callback(new Error(`Not allowed by CORS: ${normalizedOrigin}`));
     }
   },
   credentials: true
