@@ -4,9 +4,22 @@ const passport = require('passport');
 const jwt = require('jsonwebtoken');
 const { protect } = require('../middleware/auth');
 
+const hasGoogleOAuthConfig = () => Boolean(
+  process.env.GOOGLE_CLIENT_ID &&
+  process.env.GOOGLE_CLIENT_SECRET &&
+  process.env.GOOGLE_CALLBACK_URL
+);
+
 // @route   GET /api/auth/google
 // @desc    Initiate Google OAuth
 router.get('/google', (req, res, next) => {
+  if (!hasGoogleOAuthConfig()) {
+    return res.status(503).json({
+      success: false,
+      message: 'Google OAuth is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_CALLBACK_URL in NextJS_EmailDROP/.env.local or .env.'
+    });
+  }
+
   // Get the origin from referer header or query parameter
   // FRONTEND_URL takes precedence over CLIENT_URL for clarity
   const defaultOrigin = process.env.FRONTEND_URL || process.env.CLIENT_URL;
@@ -28,7 +41,9 @@ router.get('/google', (req, res, next) => {
       'profile', 
       'email', 
       'https://www.googleapis.com/auth/spreadsheets',     // Google Sheets access
-      'https://www.googleapis.com/auth/gmail.send'         // Gmail send access (secure)
+      'https://www.googleapis.com/auth/gmail.send',       // Gmail send access
+      'https://www.googleapis.com/auth/gmail.readonly',   // Gmail read access
+      'https://www.googleapis.com/auth/gmail.modify'      // Gmail modify access (for drafts, labels)
     ],
     accessType: 'offline',
     prompt: 'consent',  // Always show consent screen to get fresh refresh token
@@ -39,6 +54,16 @@ router.get('/google', (req, res, next) => {
 // @route   GET /api/auth/google/callback
 // @desc    Google OAuth callback
 router.get('/google/callback',
+  (req, res, next) => {
+    if (!hasGoogleOAuthConfig()) {
+      return res.status(503).json({
+        success: false,
+        message: 'Google OAuth is not configured on this server.'
+      });
+    }
+
+    return next();
+  },
   passport.authenticate('google', { session: false, failureRedirect: `${process.env.FRONTEND_URL || process.env.CLIENT_URL}/login` }),
   (req, res) => {
     const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, {

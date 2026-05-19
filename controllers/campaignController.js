@@ -1,20 +1,105 @@
 const Campaign = require('../models/Campaign');
 const Recipient = require('../models/Recipient');
-const Sheet = require('../models/Sheet');
+const EmailConfig = require('../models/EmailConfig');
 const User = require('../models/User');
-const { getSheetData } = require('../services/googleSheetsService');
 const { mergeTags, sendEmail } = require('../services/emailService');
 const crypto = require('crypto');
 const axios = require('axios');
+const { syncUserReplyStats } = require('../services/replyTrackingService');
+
+const resolveCampaignEmailConfig = async (userId) => {
+  const preferredConfig = await EmailConfig.findOne({
+    userId,
+    verified: true
+  }).sort({ isDefault: -1, updatedAt: -1, createdAt: -1 });
+
+  if (preferredConfig) {
+    return preferredConfig;
+  }
+
+  const fallbackConfig = await EmailConfig.findOne({ userId })
+    .sort({ isDefault: -1, updatedAt: -1, createdAt: -1 });
+
+  if (fallbackConfig) {
+    return fallbackConfig;
+  }
+
+  const user = await User.findById(userId);
+  if (!user?.googleAccessToken || !user?.email) {
+    return null;
+  }
+
+  return EmailConfig.findOneAndUpdate(
+    {
+      userId,
+      provider: 'gmail',
+      $or: [
+        { 'config.email': user.email },
+        { email: user.email }
+      ]
+    },
+    {
+      $set: {
+        name: 'Primary Gmail',
+        provider: 'gmail',
+        verified: true,
+        isDefault: true,
+        email: user.email,
+        'config.email': user.email
+      }
+    },
+    {
+      new: true,
+      upsert: true,
+      setDefaultsOnInsert: true
+    }
+  );
+};
 
 exports.getCampaigns = async (req, res) => {
   try {
+    await syncUserReplyStats(req.user._id).catch(() => null);
+
     const campaigns = await Campaign.find({ userId: req.user._id })
-      .populate('sheetId', 'name')
-      .populate('emailConfigId', 'name provider')
+      .populate('emailConfigId', 'name provider email config.email')
       .sort('-createdAt');
 
-    res.json({ success: true, data: campaigns });
+    const campaignIds = campaigns.map((campaign) => campaign._id);
+    const recipients = await Recipient.find({ campaignId: { $in: campaignIds } })
+      .sort({ createdAt: 1 });
+
+    const recipientsByCampaign = new Map();
+    for (const recipient of recipients) {
+      const mergeData = recipient.mergeData instanceof Map
+        ? Object.fromEntries(recipient.mergeData)
+        : (recipient.mergeData || {});
+      const key = String(recipient.campaignId);
+      const existingRecipients = recipientsByCampaign.get(key) || [];
+
+      existingRecipients.push({
+        name: mergeData.name || recipient.email,
+        company: mergeData.company || '',
+        email: recipient.email,
+        status: recipient.status
+      });
+
+      recipientsByCampaign.set(key, existingRecipients);
+    }
+
+    const data = campaigns.map((campaign) => {
+      const campaignJson = campaign.toObject();
+      const senderEmail = campaignJson.emailConfigId?.config?.email
+        || campaignJson.emailConfigId?.email
+        || null;
+
+      return {
+        ...campaignJson,
+        senderEmail,
+        recipients: recipientsByCampaign.get(String(campaign._id)) || []
+      };
+    });
+
+    res.json({ success: true, data });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -22,20 +107,25 @@ exports.getCampaigns = async (req, res) => {
 
 exports.getStats = async (req, res) => {
   try {
+    await syncUserReplyStats(req.user._id).catch(() => null);
+
     const campaigns = await Campaign.find({ userId: req.user._id });
     
     const totalCampaigns = campaigns.length;
     const activeCampaigns = campaigns.filter(c => c.status === 'sending').length;
-    
+
     let totalSent = 0;
     let totalOpened = 0;
+    let totalReplies = 0;
     
     for (const campaign of campaigns) {
       totalSent += campaign.stats.sent || 0;
       totalOpened += campaign.stats.opened || 0;
+      totalReplies += campaign.stats.replied || 0;
     }
     
     const openRate = totalSent > 0 ? Math.round((totalOpened / totalSent) * 100) : 0;
+    const replyRate = totalSent > 0 ? Math.round((totalReplies / totalSent) * 100) : 0;
     
     res.json({
       success: true,
@@ -43,7 +133,9 @@ exports.getStats = async (req, res) => {
         totalCampaigns,
         activeCampaigns,
         totalSent,
-        openRate
+        totalReplies,
+        openRate,
+        replyRate
       }
     });
   } catch (error) {
@@ -57,7 +149,6 @@ exports.getCampaign = async (req, res) => {
       _id: req.params.id,
       userId: req.user._id
     })
-      .populate('sheetId')
       .populate('emailConfigId');
 
     if (!campaign) {
@@ -72,13 +163,52 @@ exports.getCampaign = async (req, res) => {
 
 exports.createCampaign = async (req, res) => {
   try {
+    const { recipients, recipientSource = 'manual', ...campaignData } = req.body;
+    const resolvedEmailConfig = campaignData.emailConfigId
+      ? await EmailConfig.findOne({ _id: campaignData.emailConfigId, userId: req.user._id })
+      : await resolveCampaignEmailConfig(req.user._id);
+    
+    // Create campaign
     const campaign = await Campaign.create({
-      ...req.body,
-      userId: req.user._id
+      ...campaignData,
+      recipientSource,
+      emailConfigId: resolvedEmailConfig?._id,
+      userId: req.user._id,
+      stats: {
+        total: 0,
+        sent: 0,
+        failed: 0,
+        opened: 0,
+        bounced: 0,
+        clicked: 0,
+        replied: 0
+      }
     });
+
+    let finalRecipients = Array.isArray(recipients) ? recipients : [];
+
+    if (finalRecipients && finalRecipients.length > 0) {
+      const recipientDocs = finalRecipients.map((r) => ({
+        campaignId: campaign._id,
+        email: r.email,
+        mergeData: {
+          name: r.name || '',
+          company: r.company || '',
+          email: r.email
+        },
+        trackingId: crypto.randomUUID(),
+        status: 'pending'
+      }));
+
+      await Recipient.insertMany(recipientDocs);
+      
+      campaign.stats.total = recipientDocs.length;
+      await campaign.save();
+    }
 
     res.status(201).json({ success: true, data: campaign });
   } catch (error) {
+    console.error('Create campaign error:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -132,24 +262,26 @@ exports.previewCampaign = async (req, res) => {
     const campaign = await Campaign.findOne({
       _id: req.params.id,
       userId: req.user._id
-    }).populate('sheetId');
+    });
 
     if (!campaign) {
       return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
 
-    const user = await User.findById(req.user._id);
-    const sheetData = await getSheetData(
-      campaign.sheetId.sheetId,
-      user.googleAccessToken,
-      user.googleRefreshToken
-    );
-
     const { rowIndex = 0 } = req.body;
-    const row = sheetData.rows[rowIndex];
+
+    const savedRecipient = await Recipient.findOne({
+      campaignId: campaign._id
+    }).sort({ createdAt: 1 });
+
+    const row = savedRecipient
+      ? (savedRecipient.mergeData instanceof Map
+          ? Object.fromEntries(savedRecipient.mergeData)
+          : savedRecipient.mergeData)
+      : null;
 
     if (!row) {
-      return res.status(400).json({ success: false, message: 'Invalid row index' });
+      return res.status(400).json({ success: false, message: 'No recipient data available for preview' });
     }
 
     const mergedSubject = mergeTags(campaign.subject, row);
@@ -158,7 +290,7 @@ exports.previewCampaign = async (req, res) => {
     res.json({
       success: true,
       data: {
-        email: row[campaign.emailColumn],
+        email: row.email,
         subject: mergedSubject,
         body: mergedBody,
         mergeData: row
@@ -176,7 +308,7 @@ exports.sendCampaign = async (req, res) => {
     const campaign = await Campaign.findOne({
       _id: req.params.id,
       userId: req.user._id
-    }).populate('sheetId emailConfigId');
+    }).populate('emailConfigId');
 
     if (!campaign) {
       console.log('❌ Campaign not found:', req.params.id);
@@ -187,7 +319,6 @@ exports.sendCampaign = async (req, res) => {
       id: campaign._id,
       name: campaign.name,
       status: campaign.status,
-      hasSheet: !!campaign.sheetId,
       hasEmailConfig: !!campaign.emailConfigId
     });
 
@@ -196,76 +327,29 @@ exports.sendCampaign = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Campaign already sending' });
     }
 
-    if (!campaign.sheetId) {
-      console.log('❌ Sheet not found for campaign');
-      return res.status(400).json({ success: false, message: 'Sheet not found for this campaign' });
-    }
-
     if (!campaign.emailConfigId) {
-      console.log('❌ Email configuration not found for campaign');
-      return res.status(400).json({ success: false, message: 'Email configuration not found for this campaign' });
-    }
+      const resolvedEmailConfig = await resolveCampaignEmailConfig(req.user._id);
 
-    const user = await User.findById(req.user._id);
-    
-    console.log('👤 User details:', {
-      id: user._id,
-      email: user.email,
-      hasGoogleAccessToken: !!user.googleAccessToken,
-      hasGoogleRefreshToken: !!user.googleRefreshToken
-    });
-
-    if (!user.googleAccessToken) {
-      console.log('❌ Google authentication required');
-      return res.status(400).json({ success: false, message: 'Google authentication required. Please log out and log in again.' });
-    }
-
-    console.log('📊 Fetching sheet data from Google Sheets...');
-    const sheetData = await getSheetData(
-      campaign.sheetId.sheetId,
-      user.googleAccessToken,
-      user.googleRefreshToken
-    );
-
-    console.log('✅ Sheet data fetched:', {
-      rowCount: sheetData.rows.length,
-      headers: sheetData.headers
-    });
-
-    // Create recipients
-    const recipients = [];
-    let skippedCount = 0;
-    
-    for (const row of sheetData.rows) {
-      const email = row[campaign.emailColumn];
-      if (!email) {
-        skippedCount++;
-        continue;
+      if (!resolvedEmailConfig) {
+        console.log('❌ Email configuration not found for campaign');
+        return res.status(400).json({ success: false, message: 'Email configuration not found for this campaign' });
       }
 
-      const existing = await Recipient.findOne({
-        campaignId: campaign._id,
-        email
+      campaign.emailConfigId = resolvedEmailConfig._id;
+      await campaign.save();
+      await campaign.populate('emailConfigId');
+    }
+
+    let pendingRecipients = await Recipient.find({
+      campaignId: campaign._id,
+      status: 'pending'
+    });
+
+    if (pendingRecipients.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No recipients found for this campaign'
       });
-
-      if (!existing) {
-        recipients.push({
-          campaignId: campaign._id,
-          email,
-          mergeData: row,
-          trackingId: crypto.randomUUID()
-        });
-      }
-    }
-
-    console.log('📋 Recipients prepared:', {
-      newRecipients: recipients.length,
-      skippedEmptyEmails: skippedCount
-    });
-
-    if (recipients.length > 0) {
-      await Recipient.insertMany(recipients);
-      console.log('✅ Recipients inserted into database');
     }
 
     campaign.stats.total = await Recipient.countDocuments({ campaignId: campaign._id });
@@ -380,54 +464,9 @@ exports.getRecipients = async (req, res) => {
 
 exports.updateSheet = async (req, res) => {
   try {
-    const campaign = await Campaign.findOne({
-      _id: req.params.id,
-      userId: req.user._id
-    }).populate('sheetId');
-
-    if (!campaign) {
-      return res.status(404).json({ success: false, message: 'Campaign not found' });
-    }
-
-    const user = await User.findById(req.user._id);
-    const { updateSheetWithStatus } = require('../services/googleSheetsService');
-    const Tracking = require('../models/Tracking');
-
-    const recipients = await Recipient.find({ campaignId: campaign._id });
-    const statusData = {};
-
-    for (const recipient of recipients) {
-      const tracking = await Tracking.findOne({ recipientId: recipient._id });
-      
-      let status = 'Not Delivered';
-      if (recipient.status === 'sent') {
-        status = tracking && tracking.openCount > 0 ? 'Opened' : 'Sent (Not Opened)';
-      } else if (recipient.status === 'bounced') {
-        status = 'Bounced';
-      } else if (recipient.status === 'failed') {
-        status = 'Failed';
-      }
-
-      statusData[recipient.email] = {
-        status: status,
-        sentAt: recipient.sentAt ? new Date(recipient.sentAt).toLocaleString() : '',
-        openedAt: tracking?.firstOpenedAt ? new Date(tracking.firstOpenedAt).toLocaleString() : '',
-        openCount: tracking?.openCount || 0
-      };
-    }
-
-    const result = await updateSheetWithStatus(
-      campaign.sheetId.sheetId,
-      user.googleAccessToken,
-      user.googleRefreshToken,
-      campaign.emailColumn,
-      statusData
-    );
-
-    res.json({ 
-      success: true, 
-      message: `Updated ${result.updatedRows} rows in Google Sheet`,
-      data: result
+    res.status(410).json({
+      success: false,
+      message: 'Google Sheet updates are no longer supported for campaigns'
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -517,38 +556,62 @@ exports.generateAiDraft = async (req, res) => {
     }
 
     const {
+      prompt = '',
       purpose = '',
       audience = '',
       tone = 'professional',
       cta = '',
-      signature = 'Thanks,\nYour Team'
+      signature = 'Thanks,\nYour Team',
+      format = 'html',
+      existingContent = ''
     } = req.body || {};
 
-    if (!purpose.trim()) {
-      return res.status(400).json({ success: false, message: 'purpose is required' });
+    const normalizedPrompt = String(prompt || '').trim();
+    const normalizedPurpose = String(purpose || '').trim();
+    const normalizedExistingContent = String(existingContent || '').trim();
+    const normalizedFormat = format === 'text' ? 'text' : 'html';
+
+    if (!normalizedPrompt && !normalizedPurpose && !normalizedExistingContent) {
+      return res.status(400).json({ success: false, message: 'Provide a prompt, purpose, or existingContent' });
     }
 
     const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
     const stopToken = '###END###';
+    const wantsRewrite = Boolean(normalizedExistingContent);
+    const responseShape = '{"subject":"...","body":"..."}';
     const systemPrompt = [
-      'You write outbound email drafts for mail merge campaigns.',
-      'Return only valid email HTML using <p>, <strong>, <ul>, <li>, and <br>.',
-      'Never include markdown fences, explanations, notes, subjects, or commentary.',
-      'Keep the draft concise and usable.',
+      'You write outbound emails and email templates for business users.',
+      normalizedFormat === 'html'
+        ? 'Return body as valid email HTML using only <p>, <strong>, <em>, <ul>, <li>, <a>, and <br>.'
+        : 'Return body as plain text only. Do not include HTML.',
+      'Return a JSON object only.',
+      `The JSON must match exactly this shape: ${responseShape}.`,
+      'Never include markdown fences, explanations, notes, or commentary.',
+      'Keep the draft concise, polished, and usable.',
       'Use merge tags exactly as provided, especially {{name}} and {{company}} when relevant.',
       'Do not invent unsupported merge tags.',
+      'The subject should be natural and specific, not generic.',
       `End the response with ${stopToken}`
     ].join(' ');
 
     const userPrompt = [
-      `Purpose: ${purpose}`,
+      normalizedPrompt ? `Prompt: ${normalizedPrompt}` : null,
+      normalizedPurpose ? `Purpose: ${normalizedPurpose}` : null,
       `Audience: ${audience || 'General business recipient'}`,
       `Tone: ${tone}`,
       `Call to action: ${cta || 'Ask for a short reply or meeting.'}`,
       `Signature:\n${signature}`,
-      'Write a complete email body that starts with a greeting to {{name}} and is appropriate for mail merge.',
-      `Append ${stopToken} at the very end.`
-    ].join('\n');
+      wantsRewrite
+        ? `Existing content to improve or rewrite:\n${normalizedExistingContent}`
+        : null,
+      wantsRewrite
+        ? 'Rewrite the existing email while preserving the core intent and make it cleaner and more effective.'
+        : 'Write a complete new email that starts with a greeting to {{name}} and is appropriate for mail merge.',
+      normalizedFormat === 'html'
+        ? 'The body should be production-ready email HTML.'
+        : 'The body should be plain text suitable for direct sending.',
+      `Return only the JSON object with subject and body, then append ${stopToken} at the very end.`
+    ].filter(Boolean).join('\n');
 
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
@@ -570,20 +633,44 @@ exports.generateAiDraft = async (req, res) => {
       }
     );
 
-    const body = response.data?.choices?.[0]?.message?.content?.trim();
+    const rawContent = response.data?.choices?.[0]?.message?.content?.trim();
 
-    if (!body) {
+    if (!rawContent) {
       return res.status(500).json({ success: false, message: 'Groq returned an empty draft' });
     }
 
-    const subject = `${purpose} for {{company}}`;
+    const cleanedContent = rawContent
+      .replace(stopToken, '')
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(cleanedContent);
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: 'Groq returned an invalid AI draft response'
+      });
+    }
+
+    const subject = String(parsed?.subject || normalizedPurpose || normalizedPrompt || 'New email').trim();
+    const body = String(parsed?.body || '').trim();
+
+    if (!body) {
+      return res.status(500).json({ success: false, message: 'Groq returned an empty draft body' });
+    }
 
     res.json({
       success: true,
       data: {
         model,
         subject,
-        body
+        body,
+        format: normalizedFormat
       }
     });
   } catch (error) {
@@ -601,7 +688,7 @@ exports.retryFailed = async (req, res) => {
     const campaign = await Campaign.findOne({
       _id: req.params.id,
       userId: req.user._id
-    }).populate('sheetId emailConfigId');
+    }).populate('emailConfigId');
 
     if (!campaign) {
       console.log('❌ Campaign not found:', req.params.id);

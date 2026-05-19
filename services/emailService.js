@@ -80,7 +80,7 @@ const rewriteTrackedLinks = (html, trackingId, enabled) => {
     const trimmedHref = href.trim();
     if (!/^https?:\/\//i.test(trimmedHref)) return match;
 
-    const redirectUrl = `${baseUrl}/track/click/${trackingId}?url=${encodeURIComponent(trimmedHref)}`;
+    const redirectUrl = `${baseUrl}/api/tracking/click/${trackingId}?url=${encodeURIComponent(trimmedHref)}`;
     return `<a${before}href="${escapeAttribute(redirectUrl)}"${after}>`;
   });
 };

@@ -50,6 +50,22 @@ const emailConfigSchema = new mongoose.Schema({
     email: String,
     fromName: String // For Brevo
   },
+  // Gmail OAuth fields
+  gmailAccessToken: String,
+  gmailRefreshToken: {
+    type: String,
+    set: encrypt,
+    get: decrypt
+  },
+  email: String,
+  smtpHost: String,
+  smtpPort: Number,
+  smtpUsername: String,
+  smtpPassword: {
+    type: String,
+    set: encrypt,
+    get: decrypt
+  },
   isDefault: {
     type: Boolean,
     default: false

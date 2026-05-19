@@ -17,6 +17,12 @@ const templateSchema = new mongoose.Schema({
   body: {
     type: String,
     required: true
+  },
+  html: {
+    type: String
+  },
+  thumbnail: {
+    type: String
   }
 }, {
   timestamps: true

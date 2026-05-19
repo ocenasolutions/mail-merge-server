@@ -3,10 +3,7 @@ const Campaign = require('../models/Campaign');
 const Recipient = require('../models/Recipient');
 const EmailConfig = require('../models/EmailConfig');
 const User = require('../models/User');
-const Sheet = require('../models/Sheet');
-const Tracking = require('../models/Tracking');
 const { sendEmail, mergeTags } = require('./emailService');
-const { updateSheetWithStatus } = require('./googleSheetsService');
 const logger = require('../utils/logger');
 
 const rateLimiters = new Map();
@@ -22,48 +19,6 @@ const getRateLimiter = (userId, emailsPerMinute) => {
     );
   }
   return rateLimiters.get(userId);
-};
-
-const updateGoogleSheetStatus = async (campaign, user) => {
-  try {
-    const sheet = await Sheet.findById(campaign.sheetId);
-    if (!sheet) return;
-
-    const recipients = await Recipient.find({ campaignId: campaign._id });
-    const statusData = {};
-
-    for (const recipient of recipients) {
-      const tracking = await Tracking.findOne({ recipientId: recipient._id });
-      
-      let status = 'Not Delivered';
-      if (recipient.status === 'sent') {
-        status = tracking && tracking.openCount > 0 ? 'Opened' : 'Sent (Not Opened)';
-      } else if (recipient.status === 'bounced') {
-        status = 'Bounced';
-      } else if (recipient.status === 'failed') {
-        status = 'Failed';
-      }
-
-      statusData[recipient.email] = {
-        status: status,
-        sentAt: recipient.sentAt || '',
-        openedAt: tracking?.firstOpenedAt || '',
-        openCount: tracking?.openCount || 0
-      };
-    }
-
-    await updateSheetWithStatus(
-      sheet.sheetId,
-      user.googleAccessToken,
-      user.googleRefreshToken,
-      campaign.emailColumn,
-      statusData
-    );
-
-    logger.info({ campaignId: campaign._id, campaignName: campaign.name }, '✅ Google Sheet updated with email statuses');
-  } catch (error) {
-    logger.error({ err: error, campaignId: campaign._id }, 'Failed to update Google Sheet');
-  }
 };
 
 const processCampaign = async (campaignId) => {
@@ -98,7 +53,7 @@ const processCampaign = async (campaignId) => {
     }
 
     const user = await User.findById(campaign.userId);
-    
+
     if (!user) {
       logger.error({ campaignId, userId: campaign.userId }, '❌ User not found');
       campaign.status = 'failed';
@@ -106,11 +61,9 @@ const processCampaign = async (campaignId) => {
       return;
     }
 
-    logger.info({ 
+    logger.info({
       userId: user._id,
       userEmail: user.email,
-      hasGoogleAccessToken: !!user.googleAccessToken,
-      hasGoogleRefreshToken: !!user.googleRefreshToken,
       emailsPerMinute: user.settings.emailsPerMinute
     }, '👤 User details loaded');
 
@@ -199,6 +152,7 @@ const processCampaign = async (campaignId) => {
         if (result.success) {
           recipient.status = 'sent';
           recipient.sentAt = new Date();
+          recipient.sentSubject = subject;
           campaign.stats.sent += 1;
           successCount++;
         } else {
@@ -292,8 +246,6 @@ const processCampaign = async (campaignId) => {
         stats: campaign.stats
       }, '✅ Campaign completed');
       
-      // Update Google Sheet with final status
-      await updateGoogleSheetStatus(campaign, user);
     }
   } catch (error) {
     logger.error({ 

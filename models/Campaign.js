@@ -10,19 +10,15 @@ const campaignSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  sheetId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Sheet',
-    required: true
-  },
   emailConfigId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'EmailConfig',
-    required: true
+    required: false
   },
-  emailColumn: {
+  recipientSource: {
     type: String,
-    required: true
+    enum: ['manual', 'file'],
+    default: 'manual'
   },
   subject: {
     type: String,
@@ -54,7 +50,8 @@ const campaignSchema = new mongoose.Schema({
     failed: { type: Number, default: 0 },
     opened: { type: Number, default: 0 },
     bounced: { type: Number, default: 0 },
-    clicked: { type: Number, default: 0 }
+    clicked: { type: Number, default: 0 },
+    replied: { type: Number, default: 0 }
   }
 }, {
   timestamps: true

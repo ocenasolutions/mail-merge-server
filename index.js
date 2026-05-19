@@ -30,6 +30,7 @@ app.use(helmet());
 // CORS configuration to support multiple origins
 const allowedOrigins = [
   'http://localhost:3000',
+  'http://localhost:3001',
   'https://aischool.com',
   'https://mail-merger2.netlify.app',
   process.env.CLIENT_URL
@@ -74,6 +75,7 @@ app.use('/api/templates', require('./routes/templates'));
 app.use('/api/campaigns', require('./routes/campaigns'));
 app.use('/api/tracking', require('./routes/tracking'));
 app.use('/api/analytics', require('./routes/analytics'));
+app.use('/api/emails', require('./routes/emails'));
 
 // Tracking pixel endpoint
 app.get('/track/:trackingId', require('./controllers/trackingController').trackOpen);

@@ -20,6 +20,12 @@ const recipientSchema = new mongoose.Schema({
     default: 'pending'
   },
   sentAt: Date,
+  sentSubject: String,
+  replyCount: {
+    type: Number,
+    default: 0
+  },
+  repliedAt: Date,
   error: String,
   trackingId: String
 }, {

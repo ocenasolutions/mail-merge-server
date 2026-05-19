@@ -1,10 +1,19 @@
 const Campaign = require('../models/Campaign');
 const Recipient = require('../models/Recipient');
 const Tracking = require('../models/Tracking');
+const { syncUserReplyStats } = require('../services/replyTrackingService');
+
+const withRates = (sent, opened, clicked, bounced, replied) => ({
+  openRate: sent > 0 ? Number(((opened / sent) * 100).toFixed(2)) : 0,
+  clickRate: sent > 0 ? Number(((clicked / sent) * 100).toFixed(2)) : 0,
+  bounceRate: sent > 0 ? Number(((bounced / sent) * 100).toFixed(2)) : 0,
+  replyRate: sent > 0 ? Number(((replied / sent) * 100).toFixed(2)) : 0
+});
 
 exports.getDashboardStats = async (req, res) => {
   try {
     const userId = req.user._id;
+    await syncUserReplyStats(userId).catch(() => null);
 
     const totalCampaigns = await Campaign.countDocuments({ userId });
     const activeCampaigns = await Campaign.countDocuments({
@@ -13,17 +22,15 @@ exports.getDashboardStats = async (req, res) => {
     });
 
     const campaigns = await Campaign.find({ userId });
-    
-    const stats = campaigns.reduce((acc, campaign) => {
-      acc.totalSent += campaign.stats.sent;
-      acc.totalOpened += campaign.stats.opened;
-      acc.totalBounced += campaign.stats.bounced;
-      return acc;
-    }, { totalSent: 0, totalOpened: 0, totalBounced: 0 });
 
-    const openRate = stats.totalSent > 0
-      ? ((stats.totalOpened / stats.totalSent) * 100).toFixed(2)
-      : 0;
+    const stats = campaigns.reduce((acc, campaign) => {
+      acc.totalSent += campaign.stats.sent || 0;
+      acc.totalOpened += campaign.stats.opened || 0;
+      acc.totalBounced += campaign.stats.bounced || 0;
+      acc.totalClicked += campaign.stats.clicked || 0;
+      acc.totalReplies += campaign.stats.replied || 0;
+      return acc;
+    }, { totalSent: 0, totalOpened: 0, totalBounced: 0, totalClicked: 0, totalReplies: 0 });
 
     res.json({
       success: true,
@@ -31,7 +38,7 @@ exports.getDashboardStats = async (req, res) => {
         totalCampaigns,
         activeCampaigns,
         ...stats,
-        openRate: parseFloat(openRate)
+        ...withRates(stats.totalSent, stats.totalOpened, stats.totalClicked, stats.totalBounced, stats.totalReplies)
       }
     });
   } catch (error) {
@@ -41,6 +48,8 @@ exports.getDashboardStats = async (req, res) => {
 
 exports.getCampaignStats = async (req, res) => {
   try {
+    await syncUserReplyStats(req.user._id).catch(() => null);
+
     const campaign = await Campaign.findOne({
       _id: req.params.id,
       userId: req.user._id
@@ -52,25 +61,34 @@ exports.getCampaignStats = async (req, res) => {
 
     const recipients = await Recipient.find({ campaignId: campaign._id });
     const tracking = await Tracking.find({ campaignId: campaign._id });
-
-    const openRate = campaign.stats.sent > 0
-      ? ((campaign.stats.opened / campaign.stats.sent) * 100).toFixed(2)
-      : 0;
-
-    const bounceRate = campaign.stats.sent > 0
-      ? ((campaign.stats.bounced / campaign.stats.sent) * 100).toFixed(2)
-      : 0;
+    const repliedRecipients = recipients.filter((recipient) => (recipient.replyCount || 0) > 0);
 
     res.json({
       success: true,
       data: {
         ...campaign.stats,
-        openRate: parseFloat(openRate),
-        bounceRate: parseFloat(bounceRate),
+        recipientCount: recipients.length,
+        replied: repliedRecipients.length,
+        ...withRates(
+          campaign.stats.sent || 0,
+          campaign.stats.opened || 0,
+          campaign.stats.clicked || 0,
+          campaign.stats.bounced || 0,
+          repliedRecipients.length
+        ),
         recentOpens: tracking
-          .flatMap(t => t.opens)
-          .sort((a, b) => b.timestamp - a.timestamp)
+          .flatMap((item) => item.opens)
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+          .slice(0, 10),
+        recentReplies: repliedRecipients
+          .filter((recipient) => recipient.repliedAt)
+          .sort((a, b) => new Date(b.repliedAt).getTime() - new Date(a.repliedAt).getTime())
           .slice(0, 10)
+          .map((recipient) => ({
+            email: recipient.email,
+            repliedAt: recipient.repliedAt,
+            replyCount: recipient.replyCount || 0
+          }))
       }
     });
   } catch (error) {
@@ -80,15 +98,25 @@ exports.getCampaignStats = async (req, res) => {
 
 exports.getRecentActivity = async (req, res) => {
   try {
+    await syncUserReplyStats(req.user._id).catch(() => null);
+
     const campaigns = await Campaign.find({ userId: req.user._id })
       .sort('-updatedAt')
       .limit(10)
       .select('name status stats updatedAt');
 
     const recipients = await Recipient.find({
-      campaignId: { $in: campaigns.map(c => c._id) }
+      campaignId: { $in: campaigns.map((c) => c._id) }
     })
       .sort('-sentAt')
+      .limit(20)
+      .populate('campaignId', 'name');
+
+    const recentReplies = await Recipient.find({
+      campaignId: { $in: campaigns.map((c) => c._id) },
+      repliedAt: { $ne: null }
+    })
+      .sort('-repliedAt')
       .limit(20)
       .populate('campaignId', 'name');
 
@@ -96,7 +124,13 @@ exports.getRecentActivity = async (req, res) => {
       success: true,
       data: {
         campaigns,
-        recentSends: recipients
+        recentSends: recipients,
+        recentReplies: recentReplies.map((recipient) => ({
+          email: recipient.email,
+          campaignName: recipient.campaignId?.name || 'Campaign',
+          repliedAt: recipient.repliedAt,
+          replyCount: recipient.replyCount || 0
+        }))
       }
     });
   } catch (error) {
