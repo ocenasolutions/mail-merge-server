@@ -123,8 +123,16 @@ const processCampaign = async (campaignId) => {
 
         const subject = mergeTags(campaign.subject, mergeData);
         let body = mergeTags(campaign.body, mergeData);
-        if (campaign.useSignature !== false && user.settings?.signature?.enabled && user.settings?.signature?.html) {
-          body = `${body}${user.settings.signature.html}`;
+        if (campaign.useSignature !== false) {
+          const selectedSignatureHtml = campaign.signatureHtml || '';
+          const fallbackSignatureHtml = user.settings?.signature?.enabled && user.settings?.signature?.html
+            ? user.settings.signature.html
+            : '';
+          const resolvedSignatureHtml = selectedSignatureHtml || fallbackSignatureHtml;
+
+          if (resolvedSignatureHtml) {
+            body = `${body}${resolvedSignatureHtml}`;
+          }
         }
 
         logger.info({ 

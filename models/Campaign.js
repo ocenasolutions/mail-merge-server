@@ -42,6 +42,16 @@ const campaignSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  signatureId: {
+    type: String
+  },
+  signatureName: {
+    type: String
+  },
+  signatureHtml: {
+    type: String,
+    default: ''
+  },
   status: {
     type: String,
     enum: ['draft', 'scheduled', 'sending', 'completed', 'paused', 'failed'],

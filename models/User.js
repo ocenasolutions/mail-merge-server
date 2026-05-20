@@ -38,6 +38,28 @@ const userSchema = new mongoose.Schema({
         default: false
       }
     },
+    signatures: [{
+      id: {
+        type: String,
+        required: true
+      },
+      name: {
+        type: String,
+        default: 'Signature'
+      },
+      html: {
+        type: String,
+        default: ''
+      },
+      enabled: {
+        type: Boolean,
+        default: true
+      },
+      isDefault: {
+        type: Boolean,
+        default: false
+      }
+    }],
     signature: {
       enabled: {
         type: Boolean,

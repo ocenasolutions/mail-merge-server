@@ -30,6 +30,62 @@ const getPublicAppUrl = (req) => {
   return `${protocol}://${host}`;
 };
 
+const normalizeStoredSignatures = (incomingSignatures = [], fallbackSignature = {}) => {
+  const normalized = Array.isArray(incomingSignatures)
+    ? incomingSignatures
+      .map((signature, index) => ({
+        id: String(signature?.id || `sig_${Date.now()}_${index}`),
+        name: String(signature?.name || `Signature ${index + 1}`),
+        html: String(signature?.html || ''),
+        enabled: signature?.enabled !== false,
+        isDefault: !!signature?.isDefault
+      }))
+      .filter((signature) => signature.name || signature.html)
+    : [];
+
+  if (normalized.length === 0 && fallbackSignature?.html) {
+    normalized.push({
+      id: 'default_signature',
+      name: 'Default Signature',
+      html: String(fallbackSignature.html || ''),
+      enabled: fallbackSignature.enabled !== false,
+      isDefault: true
+    });
+  }
+
+  if (normalized.length > 0 && !normalized.some((signature) => signature.isDefault)) {
+    normalized[0].isDefault = true;
+  }
+
+  return normalized.map((signature, index) => ({
+    ...signature,
+    isDefault: normalized.findIndex((item) => item.isDefault) === index
+  }));
+};
+
+const getEffectiveSignature = (storedSignatures = [], fallbackSignature = {}) => {
+  const normalized = normalizeStoredSignatures(storedSignatures, fallbackSignature);
+  const preferred = normalized.find((signature) => signature.isDefault) || normalized[0];
+
+  if (!preferred) {
+    return {
+      signatures: [],
+      signature: {
+        enabled: false,
+        html: ''
+      }
+    };
+  }
+
+  return {
+    signatures: normalized,
+    signature: {
+      enabled: preferred.enabled !== false,
+      html: preferred.enabled === false ? '' : preferred.html || ''
+    }
+  };
+};
+
 const hasGoogleOAuthConfig = () => Boolean(
   process.env.GOOGLE_CLIENT_ID &&
   process.env.GOOGLE_CLIENT_SECRET &&
@@ -140,6 +196,10 @@ router.get('/me', protect, async (req, res) => {
 router.put('/me/settings', protect, async (req, res) => {
   try {
     const settingsPatch = req.body?.settings || {};
+    const effectiveSignature = getEffectiveSignature(
+      settingsPatch.signatures ?? req.user.settings?.signatures,
+      settingsPatch.signature ?? req.user.settings?.signature
+    );
     const nextSettings = {
       ...req.user.settings?.toObject?.(),
       ...settingsPatch,
@@ -147,9 +207,10 @@ router.put('/me/settings', protect, async (req, res) => {
         ...(req.user.settings?.notifications || {}),
         ...(settingsPatch.notifications || {})
       },
+      signatures: effectiveSignature.signatures,
       signature: {
         ...(req.user.settings?.signature || {}),
-        ...(settingsPatch.signature || {})
+        ...effectiveSignature.signature
       }
     };
 
