@@ -37,13 +37,13 @@ const refreshGmailAccessToken = async (user) => {
 const getMailboxDefaults = (provider) => {
   switch (provider) {
     case 'gmail':
-      return { host: 'imap.gmail.com', port: 993, secure: true, inboxPath: 'INBOX' };
+      return { host: 'imap.gmail.com', port: 993, secure: true, inboxPath: 'INBOX', sentPath: '[Gmail]/Sent Mail', draftsPath: '[Gmail]/Drafts', trashPath: '[Gmail]/Trash' };
     case 'godaddy':
-      return { host: 'imap.secureserver.net', port: 993, secure: true, inboxPath: 'INBOX' };
+      return { host: 'imap.secureserver.net', port: 993, secure: true, inboxPath: 'INBOX', sentPath: 'Sent', draftsPath: 'Drafts', trashPath: 'Trash' };
     case 'hostinger':
-      return { host: 'imap.hostinger.com', port: 993, secure: true, inboxPath: 'INBOX' };
+      return { host: 'imap.hostinger.com', port: 993, secure: true, inboxPath: 'INBOX', sentPath: 'Sent', draftsPath: 'Drafts', trashPath: 'Trash' };
     default:
-      return { host: '', port: 993, secure: true, inboxPath: 'INBOX' };
+      return { host: '', port: 993, secure: true, inboxPath: 'INBOX', sentPath: 'Sent', draftsPath: 'Drafts', trashPath: 'Trash' };
   }
 };
 
@@ -145,7 +145,14 @@ const listMailboxes = async (emailConfig, user) => {
 
 const resolveMailboxPath = async (client, emailConfig, folder) => {
   const mailboxes = await client.list();
-  const preferredPath = folder === 'sent' ? emailConfig.config.sentPath : emailConfig.config.inboxPath;
+  const defaults = getMailboxDefaults(emailConfig.provider);
+  const preferredPathMap = {
+    inbox: emailConfig.config.inboxPath || defaults.inboxPath,
+    sent: emailConfig.config.sentPath || defaults.sentPath,
+    drafts: emailConfig.config.draftsPath || defaults.draftsPath,
+    trash: emailConfig.config.trashPath || defaults.trashPath
+  };
+  const preferredPath = preferredPathMap[folder] || preferredPathMap.inbox;
   return findMailboxPath(mailboxes, folder, preferredPath);
 };
 

@@ -125,6 +125,8 @@ const mapGmailMessage = (message, folder, accountEmail) => {
     return header ? header.value : '';
   };
 
+  const isDraft = folder === 'drafts';
+
   return {
     id: `gmail:${message.data.id}`,
     sender: normalizeHeaderValue(getHeader('From')),
@@ -132,8 +134,8 @@ const mapGmailMessage = (message, folder, accountEmail) => {
     subject: getHeader('Subject') || '(No Subject)',
     content: getGmailBody(message.data.payload).substring(0, 500),
     timestamp: new Date(parseInt(message.data.internalDate, 10)),
-    status: message.data.labelIds.includes('UNREAD') ? 'unread' : 'read',
-    isRead: !message.data.labelIds.includes('UNREAD'),
+    status: isDraft ? 'draft' : (message.data.labelIds.includes('UNREAD') ? 'unread' : 'read'),
+    isRead: isDraft ? true : !message.data.labelIds.includes('UNREAD'),
     isTracked: false,
     isOpened: false,
     openCount: 0,
@@ -200,8 +202,8 @@ const mapMailboxMessage = (config, folder, message) => ({
   subject: message.subject || '(No Subject)',
   content: '',
   timestamp: message.date ? new Date(message.date) : new Date(),
-  status: message.seen ? 'read' : 'unread',
-  isRead: !!message.seen,
+  status: folder === 'drafts' ? 'draft' : (message.seen ? 'read' : 'unread'),
+  isRead: folder === 'drafts' ? true : !!message.seen,
   isTracked: false,
   isOpened: false,
   openCount: 0,
