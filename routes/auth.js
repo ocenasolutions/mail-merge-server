@@ -41,6 +41,7 @@ router.get('/google', (req, res, next) => {
       'profile', 
       'email', 
       'https://www.googleapis.com/auth/spreadsheets',     // Google Sheets access
+      'https://mail.google.com/',                         // Full Gmail IMAP/SMTP OAuth scope
       'https://www.googleapis.com/auth/gmail.send',       // Gmail send access
       'https://www.googleapis.com/auth/gmail.readonly',   // Gmail read access
       'https://www.googleapis.com/auth/gmail.modify'      // Gmail modify access (for drafts, labels)
@@ -116,6 +117,10 @@ router.put('/me/settings', protect, async (req, res) => {
     const nextSettings = {
       ...req.user.settings?.toObject?.(),
       ...settingsPatch,
+      notifications: {
+        ...(req.user.settings?.notifications || {}),
+        ...(settingsPatch.notifications || {})
+      },
       signature: {
         ...(req.user.settings?.signature || {}),
         ...(settingsPatch.signature || {})

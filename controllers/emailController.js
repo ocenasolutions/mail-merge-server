@@ -7,6 +7,57 @@ const TrackedEmail = require('../models/TrackedEmail');
 const { listMessages, supportsMailbox } = require('../services/mailboxService');
 const logger = require('../utils/logger');
 
+const GMAIL_ATTACHMENT_TOTAL_LIMIT_BYTES = 25 * 1024 * 1024;
+const BLOCKED_ATTACHMENT_EXTENSIONS = new Set(['ade', 'adp', 'apk', 'appx', 'bat', 'cab', 'chm', 'cmd', 'com', 'cpl', 'diagcab', 'dll', 'dmg', 'exe', 'hta', 'ins', 'isp', 'iso', 'jar', 'js', 'jse', 'lib', 'lnk', 'mde', 'msc', 'msi', 'msp', 'mst', 'nsh', 'pif', 'ps1', 'reg', 'scr', 'sct', 'sh', 'sys', 'vb', 'vbe', 'vbs', 'vxd', 'wsc', 'wsf', 'wsh']);
+
+const getAttachmentExtension = (filename = '') => filename.split('.').pop()?.toLowerCase() || '';
+
+const chunkBase64 = (value) => value.match(/.{1,76}/g)?.join('\r\n') || '';
+
+const buildGmailRawMessage = ({ from, to, cc, bcc, subject, htmlBody, trackingId, attachments = [] }) => {
+  const boundary = `emaildrop_${crypto.randomBytes(12).toString('hex')}`;
+  const lines = [
+    `From: ${from}`,
+    `To: ${to}`,
+    subject ? `Subject: ${subject}` : 'Subject: (No Subject)',
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/mixed; boundary="${boundary}"`
+  ];
+
+  if (trackingId) {
+    lines.push(`X-Entity-Ref-ID: ${trackingId}`);
+  }
+
+  if (cc) lines.push(`Cc: ${cc}`);
+  if (bcc) lines.push(`Bcc: ${bcc}`);
+
+  lines.push('');
+  lines.push(`--${boundary}`);
+  lines.push('Content-Type: text/html; charset=utf-8');
+  lines.push('Content-Transfer-Encoding: 7bit');
+  lines.push('');
+  lines.push(htmlBody);
+
+  attachments.forEach((attachment) => {
+    const base64Content = chunkBase64(attachment.buffer.toString('base64'));
+    lines.push(`--${boundary}`);
+    lines.push(`Content-Type: ${attachment.mimetype || 'application/octet-stream'}; name="${attachment.originalname}"`);
+    lines.push(`Content-Disposition: attachment; filename="${attachment.originalname}"`);
+    lines.push('Content-Transfer-Encoding: base64');
+    lines.push('');
+    lines.push(base64Content);
+  });
+
+  lines.push(`--${boundary}--`);
+  lines.push('');
+
+  return Buffer.from(lines.join('\r\n'))
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+};
+
 const normalizeHeaderValue = (value = '') => value.replace(/\s+/g, ' ').trim();
 
 const extractEmailAddress = (value = '') => {
@@ -147,6 +198,9 @@ const mapGmailMessage = (message, folder, accountEmail) => {
   };
 };
 
+const isSameMailboxEmail = (left, right) =>
+  String(left || '').trim().toLowerCase() === String(right || '').trim().toLowerCase();
+
 const fetchGmailEmails = async (user, folder) => {
   if (!user?.googleAccessToken) {
     return [];
@@ -155,7 +209,7 @@ const fetchGmailEmails = async (user, folder) => {
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
+    process.env.GOOGLE_CALLBACK_URL || process.env.GOOGLE_REDIRECT_URI
   );
 
   oauth2Client.setCredentials({
@@ -221,9 +275,25 @@ exports.getEmails = async (req, res) => {
     const user = await User.findById(userId);
     const configs = await EmailConfig.find({ userId });
     const knownAccountEmails = buildKnownAccountEmails(user, configs);
+    const selectedConfig = accountId && accountId !== 'gmail'
+      ? configs.find((config) => String(config._id) === String(accountId))
+      : null;
+    const selectedConfigEmail = selectedConfig?.config?.email || selectedConfig?.email || null;
+    const shouldUseGmailApiForSelectedConfig = selectedConfig?.provider === 'gmail'
+      && isSameMailboxEmail(selectedConfigEmail, user?.email);
 
     const mailboxConfigs = configs.filter((config) => {
       if (accountId && accountId !== 'gmail' && String(config._id) !== String(accountId)) {
+        return false;
+      }
+
+      // Configured Gmail accounts do not have their own OAuth token set in this app.
+      // Only the signed-in primary Gmail mailbox should be loaded, via Gmail API.
+      if (config.provider === 'gmail') {
+        return false;
+      }
+
+      if (shouldUseGmailApiForSelectedConfig && String(config._id) === String(selectedConfig?._id)) {
         return false;
       }
 
@@ -231,7 +301,7 @@ exports.getEmails = async (req, res) => {
     });
 
     const results = await Promise.all([
-      (!accountId || accountId === 'gmail')
+      (!accountId || accountId === 'gmail' || shouldUseGmailApiForSelectedConfig)
         ? fetchGmailEmails(user, folder).catch((error) => {
             logger.error({ err: error }, 'Error fetching Gmail mailbox');
             return [];
@@ -316,6 +386,7 @@ exports.sendEmail = async (req, res) => {
   try {
     const { to, subject, content, cc, bcc, isTracked } = req.body;
     const userId = req.user._id;
+    const attachments = Array.isArray(req.files) ? req.files : [];
 
     const user = await User.findById(userId);
 
@@ -336,7 +407,7 @@ exports.sendEmail = async (req, res) => {
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
-      process.env.GOOGLE_REDIRECT_URI
+      process.env.GOOGLE_CALLBACK_URL || process.env.GOOGLE_REDIRECT_URI
     );
 
     oauth2Client.setCredentials({
@@ -347,31 +418,33 @@ exports.sendEmail = async (req, res) => {
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     const trackingId = isTracked ? crypto.randomUUID() : null;
     const htmlBody = buildTrackedBody(content || '', trackingId, !!isTracked);
+    const totalAttachmentBytes = attachments.reduce((sum, file) => sum + (file.size || 0), 0);
 
-    const emailLines = [
-      `From: ${user.email}`,
-      `To: ${to}`,
-      subject ? `Subject: ${subject}` : 'Subject: (No Subject)',
-      'MIME-Version: 1.0',
-      'Content-Type: text/html; charset=utf-8'
-    ];
-
-    if (trackingId) {
-      emailLines.push(`X-Entity-Ref-ID: ${trackingId}`);
+    const blockedFile = attachments.find((file) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(file.originalname)));
+    if (blockedFile) {
+      return res.status(400).json({
+        success: false,
+        message: `Attachment type not allowed: ${blockedFile.originalname}`
+      });
     }
 
-    if (cc) emailLines.push(`Cc: ${cc}`);
-    if (bcc) emailLines.push(`Bcc: ${bcc}`);
+    if (totalAttachmentBytes > GMAIL_ATTACHMENT_TOTAL_LIMIT_BYTES) {
+      return res.status(400).json({
+        success: false,
+        message: 'Attachments exceed Gmail\'s 25 MB total size limit.'
+      });
+    }
 
-    emailLines.push('');
-    emailLines.push(htmlBody);
-
-    const email = emailLines.join('\\r\\n');
-    const encodedEmail = Buffer.from(email)
-      .toString('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
+    const encodedEmail = buildGmailRawMessage({
+      from: user.email,
+      to,
+      cc,
+      bcc,
+      subject,
+      htmlBody,
+      trackingId,
+      attachments
+    });
 
     const result = await gmail.users.messages.send({
       userId: 'me',

@@ -4,6 +4,91 @@ const { google } = require('googleapis');
 const logger = require('../utils/logger');
 const { appendSentMessage } = require('./mailboxService');
 
+const BLOCKED_ATTACHMENT_EXTENSIONS = new Set(['ade', 'adp', 'apk', 'appx', 'bat', 'cab', 'chm', 'cmd', 'com', 'cpl', 'diagcab', 'dll', 'dmg', 'exe', 'hta', 'ins', 'isp', 'iso', 'jar', 'js', 'jse', 'lib', 'lnk', 'mde', 'msc', 'msi', 'msp', 'mst', 'nsh', 'pif', 'ps1', 'reg', 'scr', 'sct', 'sh', 'sys', 'vb', 'vbe', 'vbs', 'vxd', 'wsc', 'wsf', 'wsh']);
+const PROVIDER_ATTACHMENT_LIMITS = {
+  gmail: 25 * 1024 * 1024,
+  outlook: 25 * 1024 * 1024,
+  hostinger: 25 * 1024 * 1024,
+  smtp: 25 * 1024 * 1024,
+  brevo: 20 * 1024 * 1024,
+  sendgrid: 30 * 1024 * 1024,
+  mailgun: 25 * 1024 * 1024,
+  godaddy: 30 * 1024 * 1024
+};
+
+const getAttachmentExtension = (filename = '') => filename.split('.').pop()?.toLowerCase() || '';
+const chunkBase64 = (value) => value.match(/.{1,76}/g)?.join('\r\n') || '';
+
+const normalizeAttachments = (attachments = []) => attachments.map((attachment) => ({
+  filename: attachment.filename || attachment.name,
+  contentType: attachment.contentType || attachment.mimeType || 'application/octet-stream',
+  content: Buffer.isBuffer(attachment.content)
+    ? attachment.content
+    : Buffer.from(attachment.contentBase64 || '', 'base64'),
+  size: attachment.size || (attachment.content ? attachment.content.length : Buffer.from(attachment.contentBase64 || '', 'base64').length)
+}));
+
+const validateAttachments = (provider, attachments = []) => {
+  const normalizedAttachments = normalizeAttachments(attachments);
+  const blockedAttachment = normalizedAttachments.find((attachment) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(attachment.filename)));
+
+  if (blockedAttachment) {
+    throw new Error(`Attachment type not allowed: ${blockedAttachment.filename}`);
+  }
+
+  const providerLimit = PROVIDER_ATTACHMENT_LIMITS[provider] || PROVIDER_ATTACHMENT_LIMITS.smtp;
+  const totalAttachmentBytes = normalizedAttachments.reduce((sum, attachment) => sum + (attachment.size || 0), 0);
+
+  if (totalAttachmentBytes > providerLimit) {
+    throw new Error(`Attachments exceed the ${Math.round(providerLimit / (1024 * 1024))} MB limit for ${provider}.`);
+  }
+
+  return normalizedAttachments;
+};
+
+const buildGmailRawMessage = ({ from, to, subject, htmlBody, trackingId, cc, bcc, attachments = [] }) => {
+  const boundary = `emaildrop_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const lines = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/mixed; boundary="${boundary}"`
+  ];
+
+  if (trackingId) {
+    lines.push(`X-Entity-Ref-ID: ${trackingId}`);
+  }
+
+  if (cc) lines.push(`Cc: ${cc}`);
+  if (bcc) lines.push(`Bcc: ${bcc}`);
+
+  lines.push('');
+  lines.push(`--${boundary}`);
+  lines.push('Content-Type: text/html; charset=utf-8');
+  lines.push('Content-Transfer-Encoding: 7bit');
+  lines.push('');
+  lines.push(htmlBody);
+
+  attachments.forEach((attachment) => {
+    lines.push(`--${boundary}`);
+    lines.push(`Content-Type: ${attachment.contentType}; name="${attachment.filename}"`);
+    lines.push(`Content-Disposition: attachment; filename="${attachment.filename}"`);
+    lines.push('Content-Transfer-Encoding: base64');
+    lines.push('');
+    lines.push(chunkBase64(attachment.content.toString('base64')));
+  });
+
+  lines.push(`--${boundary}--`);
+  lines.push('');
+
+  return Buffer.from(lines.join('\r\n'))
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+};
+
 const mergeTags = (text, data) => {
   if (!text) return text;
 
@@ -127,10 +212,12 @@ const createTransporter = async (emailConfig, user) => {
 const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId, options = {}) => {
   try {
     const trackingEnabled = options.trackingEnabled !== false;
+    const attachments = validateAttachments(emailConfig.provider, options.attachments || []);
     logger.info({ 
       recipient, 
       trackingId,
       trackingEnabled,
+      attachmentCount: attachments.length,
       provider: emailConfig.provider,
       hasEmailConfig: !!emailConfig,
       hasUser: !!user,
@@ -220,22 +307,16 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
 
         // Create email message
         const fromEmail = emailConfig.config.email || user.email;
-        const emailLines = [
-          `From: ${fromEmail}`,
-          `To: ${recipient}`,
-          `Subject: ${subject}`,
-          'MIME-Version: 1.0',
-          'Content-Type: text/html; charset=utf-8',
-          '',
-          bodyWithTracking
-        ];
-
-        const email = emailLines.join('\r\n');
-        const encodedEmail = Buffer.from(email)
-          .toString('base64')
-          .replace(/\+/g, '-')
-          .replace(/\//g, '_')
-          .replace(/=+$/, '');
+        const encodedEmail = buildGmailRawMessage({
+          from: fromEmail,
+          to: recipient,
+          subject,
+          htmlBody: bodyWithTracking,
+          trackingId,
+          cc: options.cc,
+          bcc: options.bcc,
+          attachments
+        });
 
         // Send via Gmail API
         await gmail.users.messages.send({
@@ -268,6 +349,11 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
           to: recipient,
           subject,
           html: bodyWithTracking,
+          attachments: attachments.map((attachment) => ({
+            filename: attachment.filename,
+            content: attachment.content,
+            contentType: attachment.contentType
+          })),
           headers: {
             'X-Entity-Ref-ID': trackingId,
             'List-Unsubscribe': `<${process.env.APP_URL}/unsubscribe/${trackingId}>`,
@@ -305,7 +391,13 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             personalizations: [{ to: [{ email: recipient }] }],
             from: { email: emailConfig.config.email },
             subject,
-            content: [{ type: 'text/html', value: bodyWithTracking }]
+            content: [{ type: 'text/html', value: bodyWithTracking }],
+            attachments: attachments.map((attachment) => ({
+              content: attachment.content.toString('base64'),
+              filename: attachment.filename,
+              type: attachment.contentType,
+              disposition: 'attachment'
+            }))
           },
           {
             headers: {
@@ -324,6 +416,9 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
         formData.append('to', recipient);
         formData.append('subject', subject);
         formData.append('html', bodyWithTracking);
+        attachments.forEach((attachment) => {
+          formData.append('attachment', `data:${attachment.contentType};base64,${attachment.content.toString('base64')}`);
+        });
 
         await axios.post(
           `https://api.mailgun.net/v3/${emailConfig.config.domain}/messages`,
@@ -350,7 +445,11 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             },
             to: [{ email: recipient }],
             subject,
-            htmlContent: bodyWithTracking
+            htmlContent: bodyWithTracking,
+            attachment: attachments.map((attachment) => ({
+              name: attachment.filename,
+              content: attachment.content.toString('base64')
+            }))
           },
           {
             headers: {

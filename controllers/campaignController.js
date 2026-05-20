@@ -1,11 +1,27 @@
 const Campaign = require('../models/Campaign');
 const Recipient = require('../models/Recipient');
 const EmailConfig = require('../models/EmailConfig');
+const Tracking = require('../models/Tracking');
 const User = require('../models/User');
 const { mergeTags, sendEmail } = require('../services/emailService');
 const crypto = require('crypto');
 const axios = require('axios');
 const { syncUserReplyStats } = require('../services/replyTrackingService');
+
+const BLOCKED_ATTACHMENT_EXTENSIONS = new Set(['ade', 'adp', 'apk', 'appx', 'bat', 'cab', 'chm', 'cmd', 'com', 'cpl', 'diagcab', 'dll', 'dmg', 'exe', 'hta', 'ins', 'isp', 'iso', 'jar', 'js', 'jse', 'lib', 'lnk', 'mde', 'msc', 'msi', 'msp', 'mst', 'nsh', 'pif', 'ps1', 'reg', 'scr', 'sct', 'sh', 'sys', 'vb', 'vbe', 'vbs', 'vxd', 'wsc', 'wsf', 'wsh']);
+const PROVIDER_ATTACHMENT_LIMITS = {
+  gmail: 25 * 1024 * 1024,
+  outlook: 25 * 1024 * 1024,
+  hostinger: 25 * 1024 * 1024,
+  smtp: 25 * 1024 * 1024,
+  custom: 25 * 1024 * 1024,
+  brevo: 20 * 1024 * 1024,
+  sendgrid: 30 * 1024 * 1024,
+  mailgun: 25 * 1024 * 1024,
+  godaddy: 30 * 1024 * 1024
+};
+
+const getAttachmentExtension = (filename = '') => filename.split('.').pop()?.toLowerCase() || '';
 
 const resolveCampaignEmailConfig = async (userId) => {
   const preferredConfig = await EmailConfig.findOne({
@@ -67,8 +83,27 @@ exports.getCampaigns = async (req, res) => {
     const campaignIds = campaigns.map((campaign) => campaign._id);
     const recipients = await Recipient.find({ campaignId: { $in: campaignIds } })
       .sort({ createdAt: 1 });
+    const trackingDocs = await Tracking.find({ campaignId: { $in: campaignIds } })
+      .select('campaignId openCount clickCount');
 
     const recipientsByCampaign = new Map();
+    const liveStatsByCampaign = new Map();
+
+    for (const tracking of trackingDocs) {
+      const key = String(tracking.campaignId);
+      const current = liveStatsByCampaign.get(key) || { opened: 0, clicked: 0, replied: 0 };
+
+      if ((tracking.openCount || 0) > 0) {
+        current.opened += 1;
+      }
+
+      if ((tracking.clickCount || 0) > 0) {
+        current.clicked += 1;
+      }
+
+      liveStatsByCampaign.set(key, current);
+    }
+
     for (const recipient of recipients) {
       const mergeData = recipient.mergeData instanceof Map
         ? Object.fromEntries(recipient.mergeData)
@@ -84,6 +119,12 @@ exports.getCampaigns = async (req, res) => {
       });
 
       recipientsByCampaign.set(key, existingRecipients);
+
+      const current = liveStatsByCampaign.get(key) || { opened: 0, clicked: 0, replied: 0 };
+      if ((recipient.replyCount || 0) > 0) {
+        current.replied += 1;
+      }
+      liveStatsByCampaign.set(key, current);
     }
 
     const data = campaigns.map((campaign) => {
@@ -91,11 +132,23 @@ exports.getCampaigns = async (req, res) => {
       const senderEmail = campaignJson.emailConfigId?.config?.email
         || campaignJson.emailConfigId?.email
         || null;
+      const liveStats = liveStatsByCampaign.get(String(campaign._id)) || { opened: 0, clicked: 0, replied: 0 };
 
       return {
         ...campaignJson,
+        stats: {
+          ...campaignJson.stats,
+          opened: liveStats.opened,
+          clicked: liveStats.clicked,
+          replied: liveStats.replied
+        },
         senderEmail,
-        recipients: recipientsByCampaign.get(String(campaign._id)) || []
+        recipients: recipientsByCampaign.get(String(campaign._id)) || [],
+        attachments: (campaignJson.attachments || []).map((attachment) => ({
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          size: attachment.size
+        }))
       };
     });
 
@@ -164,15 +217,43 @@ exports.getCampaign = async (req, res) => {
 exports.createCampaign = async (req, res) => {
   try {
     const { recipients, recipientSource = 'manual', ...campaignData } = req.body;
+    const parsedRecipients = Array.isArray(recipients)
+      ? recipients
+      : typeof recipients === 'string' && recipients.trim()
+        ? JSON.parse(recipients)
+        : [];
     const resolvedEmailConfig = campaignData.emailConfigId
       ? await EmailConfig.findOne({ _id: campaignData.emailConfigId, userId: req.user._id })
       : await resolveCampaignEmailConfig(req.user._id);
+    const uploadedAttachments = Array.isArray(req.files) ? req.files : [];
+    const blockedAttachment = uploadedAttachments.find((file) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(file.originalname)));
+
+    if (blockedAttachment) {
+      return res.status(400).json({ success: false, message: `Attachment type not allowed: ${blockedAttachment.originalname}` });
+    }
+
+    const providerKey = resolvedEmailConfig?.provider || 'gmail';
+    const providerLimit = PROVIDER_ATTACHMENT_LIMITS[providerKey] || PROVIDER_ATTACHMENT_LIMITS.smtp;
+    const totalAttachmentBytes = uploadedAttachments.reduce((sum, file) => sum + (file.size || 0), 0);
+
+    if (totalAttachmentBytes > providerLimit) {
+      return res.status(400).json({
+        success: false,
+        message: `Attachments exceed the ${Math.round(providerLimit / (1024 * 1024))} MB limit for ${providerKey}.`
+      });
+    }
     
     // Create campaign
     const campaign = await Campaign.create({
       ...campaignData,
       recipientSource,
       emailConfigId: resolvedEmailConfig?._id,
+      attachments: uploadedAttachments.map((file) => ({
+        name: file.originalname,
+        mimeType: file.mimetype || 'application/octet-stream',
+        size: file.size || 0,
+        contentBase64: file.buffer.toString('base64')
+      })),
       userId: req.user._id,
       stats: {
         total: 0,
@@ -185,17 +266,18 @@ exports.createCampaign = async (req, res) => {
       }
     });
 
-    let finalRecipients = Array.isArray(recipients) ? recipients : [];
+    let finalRecipients = Array.isArray(parsedRecipients) ? parsedRecipients : [];
 
     if (finalRecipients && finalRecipients.length > 0) {
       const recipientDocs = finalRecipients.map((r) => ({
-        campaignId: campaign._id,
-        email: r.email,
         mergeData: {
-          name: r.name || '',
-          company: r.company || '',
+          ...(r.mergeData || {}),
+          name: r.name || r.mergeData?.name || '',
+          company: r.company || r.mergeData?.company || '',
           email: r.email
         },
+        campaignId: campaign._id,
+        email: r.email,
         trackingId: crypto.randomUUID(),
         status: 'pending'
       }));
@@ -445,7 +527,9 @@ exports.getRecipients = async (req, res) => {
           tracking: tracking ? {
             openCount: tracking.openCount,
             firstOpenedAt: tracking.firstOpenedAt,
-            lastOpenedAt: tracking.lastOpenedAt
+            lastOpenedAt: tracking.lastOpenedAt,
+            clickCount: tracking.clickCount,
+            clicks: tracking.clicks || []
           } : null
         };
       })

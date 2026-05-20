@@ -26,6 +26,17 @@ const recipientSchema = new mongoose.Schema({
     default: 0
   },
   repliedAt: Date,
+  latestReplySnippet: String,
+  leadStatus: {
+    type: String,
+    enum: ['hot', 'warm', 'cold', 'not_interested', 'unknown'],
+    default: 'unknown'
+  },
+  leadScore: {
+    type: Number,
+    default: 0
+  },
+  leadReason: String,
   error: String,
   trackingId: String
 }, {

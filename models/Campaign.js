@@ -28,6 +28,12 @@ const campaignSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  attachments: [{
+    name: { type: String, required: true },
+    mimeType: { type: String, default: 'application/octet-stream' },
+    size: { type: Number, default: 0 },
+    contentBase64: { type: String, required: true }
+  }],
   trackingEnabled: {
     type: Boolean,
     default: true

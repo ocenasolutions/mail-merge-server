@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
 const { protect } = require('../middleware/auth');
 const campaignController = require('../controllers/campaignController');
+const upload = multer({ storage: multer.memoryStorage() });
 
 router.use(protect);
 
@@ -9,7 +11,7 @@ router.get('/stats', campaignController.getStats);
 
 router.route('/')
   .get(campaignController.getCampaigns)
-  .post(campaignController.createCampaign);
+  .post(upload.array('attachments', 10), campaignController.createCampaign);
 
 router.route('/:id')
   .get(campaignController.getCampaign)

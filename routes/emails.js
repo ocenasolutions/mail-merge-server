@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
 const { protect } = require('../middleware/auth');
 const emailController = require('../controllers/emailController');
+const upload = multer({ storage: multer.memoryStorage() });
 
 router.use(protect);
 
@@ -9,7 +11,7 @@ router.use(protect);
 router.get('/', emailController.getEmails);
 
 // Send email
-router.post('/send', emailController.sendEmail);
+router.post('/send', upload.array('attachments', 10), emailController.sendEmail);
 
 // Save draft
 router.post('/draft', emailController.saveDraft);

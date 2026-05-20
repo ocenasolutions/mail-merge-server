@@ -49,6 +49,38 @@ const getMailboxDefaults = (provider) => {
   }
 };
 
+const attachMailboxErrorHandler = (client, emailConfig) => {
+  client.on('error', (error) => {
+    logger.error(
+      {
+        err: error,
+        provider: emailConfig?.provider,
+        email: emailConfig?.config?.email || emailConfig?.email || null
+      },
+      'IMAP client error'
+    );
+  });
+};
+
+const closeMailboxClient = async (client) => {
+  if (!client) return;
+
+  try {
+    if (client.usable) {
+      await client.logout();
+      return;
+    }
+  } catch (error) {
+    logger.warn({ err: error }, 'IMAP logout failed, closing socket');
+  }
+
+  try {
+    client.close();
+  } catch (error) {
+    logger.warn({ err: error }, 'IMAP close failed');
+  }
+};
+
 const createMailboxClient = async (emailConfig, user) => {
   if (!supportsMailbox(emailConfig)) {
     throw new Error(`Mailbox sync is not supported for ${emailConfig.provider}`);
@@ -93,8 +125,12 @@ const createMailboxClient = async (emailConfig, user) => {
     port,
     secure,
     auth,
-    logger: false
+    logger: false,
+    connectionTimeout: 15000,
+    socketTimeout: 20000
   });
+
+  attachMailboxErrorHandler(client, emailConfig);
 
   await client.connect();
   return client;
@@ -141,7 +177,7 @@ const listMailboxes = async (emailConfig, user) => {
       specialUse: mailbox.specialUse || null
     }));
   } finally {
-    await client.logout().catch(() => {});
+    await closeMailboxClient(client);
   }
 };
 
@@ -215,7 +251,7 @@ const listMessages = async (emailConfig, user, { folder = 'inbox', limit = 10, o
     logger.error({ err: error, provider: emailConfig.provider }, 'Mailbox fetch failed');
     throw error;
   } finally {
-    await client.logout().catch(() => {});
+    await closeMailboxClient(client);
   }
 };
 
@@ -255,7 +291,7 @@ const getMessageDetail = async (emailConfig, user, { folder = 'inbox', uid }) =>
       lock.release();
     }
   } finally {
-    await client.logout().catch(() => {});
+    await closeMailboxClient(client);
   }
 };
 
@@ -278,7 +314,7 @@ const appendSentMessage = async (emailConfig, user, { to, subject, html, from, d
     await client.append(mailboxPath, mimeMessage, ['\\Seen'], date);
     return { success: true, mailboxPath };
   } finally {
-    await client.logout().catch(() => {});
+    await closeMailboxClient(client);
   }
 };
 

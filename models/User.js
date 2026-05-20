@@ -28,6 +28,16 @@ const userSchema = new mongoose.Schema({
       type: Number,
       default: 50
     },
+    followUpDelayDays: {
+      type: Number,
+      default: 1
+    },
+    notifications: {
+      replyNotificationsEnabled: {
+        type: Boolean,
+        default: false
+      }
+    },
     signature: {
       enabled: {
         type: Boolean,

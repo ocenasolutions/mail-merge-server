@@ -140,7 +140,10 @@ const processCampaign = async (campaignId) => {
           subject,
           body,
           recipient.trackingId,
-          { trackingEnabled: campaign.trackingEnabled !== false }
+          {
+            trackingEnabled: campaign.trackingEnabled !== false,
+            attachments: campaign.attachments || []
+          }
         );
 
         logger.info({ 
