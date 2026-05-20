@@ -417,7 +417,10 @@ exports.sendEmail = async (req, res) => {
 
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     const trackingId = isTracked ? crypto.randomUUID() : null;
-    const htmlBody = buildTrackedBody(content || '', trackingId, !!isTracked);
+    const signatureHtml = user.settings?.signature?.enabled && user.settings?.signature?.html
+      ? user.settings.signature.html
+      : '';
+    const htmlBody = buildTrackedBody(`${content || ''}${signatureHtml}`, trackingId, !!isTracked);
     const totalAttachmentBytes = attachments.reduce((sum, file) => sum + (file.size || 0), 0);
 
     const blockedFile = attachments.find((file) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(file.originalname)));

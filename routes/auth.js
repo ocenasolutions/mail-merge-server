@@ -2,7 +2,33 @@ const express = require('express');
 const router = express.Router();
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
 const { protect } = require('../middleware/auth');
+const SignatureAsset = require('../models/SignatureAsset');
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 3 * 1024 * 1024
+  },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype?.startsWith('image/')) {
+      return cb(new Error('Only image files are allowed.'));
+    }
+
+    cb(null, true);
+  }
+});
+
+const getPublicAppUrl = (req) => {
+  if (process.env.APP_URL) {
+    return String(process.env.APP_URL).replace(/\/$/, '');
+  }
+
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  return `${protocol}://${host}`;
+};
 
 const hasGoogleOAuthConfig = () => Boolean(
   process.env.GOOGLE_CLIENT_ID &&
@@ -139,6 +165,60 @@ router.put('/me/settings', protect, async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+});
+
+router.post('/me/signature-image', protect, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Signature image is required.'
+      });
+    }
+
+    const asset = await SignatureAsset.create({
+      userId: req.user._id,
+      filename: req.file.originalname,
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+      data: req.file.buffer
+    });
+
+    const publicUrl = `${getPublicAppUrl(req)}/api/auth/signature-images/${asset._id}`;
+
+    res.json({
+      success: true,
+      data: {
+        id: asset._id,
+        url: publicUrl,
+        filename: asset.filename,
+        mimeType: asset.mimeType,
+        size: asset.size
+      }
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+router.get('/signature-images/:id', async (req, res) => {
+  try {
+    const asset = await SignatureAsset.findById(req.params.id).lean();
+
+    if (!asset) {
+      return res.status(404).send('Not found');
+    }
+
+    res.setHeader('Content-Type', asset.mimeType);
+    res.setHeader('Content-Length', asset.size);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(asset.data);
+  } catch (error) {
+    res.status(404).send('Not found');
   }
 });
 
