@@ -95,6 +95,7 @@ const createTransporter = async (emailConfig, user) => {
     case 'godaddy':
     case 'hostinger':
     case 'smtp':
+    case 'outlook':
       logger.info({
         provider: emailConfig.provider,
         host: emailConfig.config.host,
@@ -106,7 +107,7 @@ const createTransporter = async (emailConfig, user) => {
       return nodemailer.createTransport({
         host: emailConfig.config.host,
         port: emailConfig.config.port,
-        secure: emailConfig.config.secure !== false, // Default to true for GoDaddy
+        secure: emailConfig.config.secure !== false,
         auth: {
           user: emailConfig.config.username,
           pass: emailConfig.config.password
@@ -250,6 +251,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
       case 'godaddy':
       case 'hostinger':
       case 'smtp':
+      case 'outlook':
         logger.info({ 
           provider: emailConfig.provider,
           recipient,
@@ -426,7 +428,9 @@ const testEmailConnection = async (emailConfig, user) => {
               ? 'GoDaddy SMTP connection successful'
               : emailConfig.provider === 'hostinger'
                 ? 'Hostinger SMTP connection successful'
-                : 'SMTP connection successful'
+                : emailConfig.provider === 'outlook'
+                  ? 'Outlook / Microsoft 365 SMTP connection successful'
+                  : 'SMTP connection successful'
         };
 
       case 'sendgrid':

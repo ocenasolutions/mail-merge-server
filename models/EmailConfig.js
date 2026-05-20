@@ -13,7 +13,7 @@ const emailConfigSchema = new mongoose.Schema({
   },
   provider: {
     type: String,
-    enum: ['gmail', 'godaddy', 'hostinger', 'smtp', 'sendgrid', 'mailgun', 'brevo'],
+    enum: ['gmail', 'godaddy', 'hostinger', 'smtp', 'outlook', 'sendgrid', 'mailgun', 'brevo'],
     required: true
   },
   config: {
