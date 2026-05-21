@@ -122,7 +122,7 @@ const processCampaign = async (campaignId) => {
         }, '🔄 Merge data prepared');
 
         const subject = mergeTags(campaign.subject, mergeData);
-        let body = mergeTags(campaign.body, mergeData);
+        let body = mergeTags(campaign.htmlBody || campaign.body, mergeData);
         if (campaign.useSignature !== false) {
           const selectedSignatureHtml = campaign.signatureHtml || '';
           const fallbackSignatureHtml = user.settings?.signature?.enabled && user.settings?.signature?.html
