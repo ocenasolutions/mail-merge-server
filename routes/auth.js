@@ -276,7 +276,10 @@ router.get('/signature-images/:id', async (req, res) => {
 
     res.setHeader('Content-Type', asset.mimeType);
     res.setHeader('Content-Length', asset.size);
+    res.setHeader('Content-Disposition', `inline; filename="${asset.filename}"`);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(asset.data);
   } catch (error) {
     res.status(404).send('Not found');

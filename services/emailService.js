@@ -3,6 +3,8 @@ const axios = require('axios');
 const { google } = require('googleapis');
 const logger = require('../utils/logger');
 const { appendSentMessage } = require('./mailboxService');
+const { appendEmailDebugLog, redactApiKey } = require('../utils/emailDebugLogger');
+const SignatureAsset = require('../models/SignatureAsset');
 
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set(['ade', 'adp', 'apk', 'appx', 'bat', 'cab', 'chm', 'cmd', 'com', 'cpl', 'diagcab', 'dll', 'dmg', 'exe', 'hta', 'ins', 'isp', 'iso', 'jar', 'js', 'jse', 'lib', 'lnk', 'mde', 'msc', 'msi', 'msp', 'mst', 'nsh', 'pif', 'ps1', 'reg', 'scr', 'sct', 'sh', 'sys', 'vb', 'vbe', 'vbs', 'vxd', 'wsc', 'wsf', 'wsh']);
 const PROVIDER_ATTACHMENT_LIMITS = {
@@ -90,7 +92,10 @@ const buildGmailRawMessage = ({ from, to, subject, htmlBody, trackingId, cc, bcc
   attachments.forEach((attachment) => {
     lines.push(`--${boundary}`);
     lines.push(`Content-Type: ${attachment.contentType}; name="${attachment.filename}"`);
-    lines.push(`Content-Disposition: attachment; filename="${attachment.filename}"`);
+    if (attachment.cid) {
+      lines.push(`Content-ID: <${attachment.cid}>`);
+    }
+    lines.push(`Content-Disposition: ${attachment.disposition || 'attachment'}; filename="${attachment.filename}"`);
     lines.push('Content-Transfer-Encoding: base64');
     lines.push('');
     lines.push(chunkBase64(attachment.content.toString('base64')));
@@ -187,6 +192,101 @@ const rewriteTrackedLinks = (html, trackingId, enabled) => {
   });
 };
 
+const buildSignatureImageUrlPattern = () => {
+  const appUrl = process.env.APP_URL ? String(process.env.APP_URL).replace(/\/$/, '') : null;
+  const escapedAppUrl = appUrl?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const prefix = escapedAppUrl
+    ? `(?:${escapedAppUrl})?\\/api\\/auth\\/signature-images\\/`
+    : `(?:https?:\\/\\/[^"'\\s<>]+)?\\/api\\/auth\\/signature-images\\/`;
+
+  return new RegExp(`(<img\\b[^>]*?src=["'])${prefix}([a-f0-9]{24})(["'][^>]*>)`, 'gi');
+};
+
+const getEmailPublicAppUrl = () => (
+  process.env.EMAIL_PUBLIC_APP_URL ||
+  process.env.PUBLIC_APP_URL ||
+  process.env.APP_URL ||
+  ''
+).replace(/\/$/, '');
+
+const rewriteSignatureImageUrls = (html) => {
+  const publicAppUrl = getEmailPublicAppUrl();
+  if (!html || !publicAppUrl) return html;
+
+  const pattern = buildSignatureImageUrlPattern();
+  return html.replace(pattern, (match, before, assetId, after) => (
+    `${before}${publicAppUrl}/api/auth/signature-images/${assetId}${after}`
+  ));
+};
+
+const inlineSignatureImages = async (html, existingAttachments = [], options = {}) => {
+  if (!html) {
+    return { html, attachments: existingAttachments };
+  }
+
+  if (options.embedImages === false) {
+    return {
+      html: rewriteSignatureImageUrls(html),
+      attachments: existingAttachments
+    };
+  }
+
+  const signatureAssetIds = [];
+  const pattern = buildSignatureImageUrlPattern();
+
+  html.replace(pattern, (match, before, assetId) => {
+    if (!signatureAssetIds.includes(assetId)) {
+      signatureAssetIds.push(assetId);
+    }
+    return match;
+  });
+
+  if (signatureAssetIds.length === 0) {
+    return { html, attachments: existingAttachments };
+  }
+
+  const assets = await SignatureAsset.find({ _id: { $in: signatureAssetIds } }).lean();
+  const assetsById = new Map(assets.map((asset) => [String(asset._id), asset]));
+  const inlineAttachments = [];
+
+  const normalizeAssetBuffer = (data) => {
+    if (Buffer.isBuffer(data)) return data;
+    if (data?.buffer && Buffer.isBuffer(data.buffer)) return data.buffer;
+    if (Array.isArray(data?.data)) return Buffer.from(data.data);
+    if (Array.isArray(data)) return Buffer.from(data);
+    return Buffer.alloc(0);
+  };
+
+  const nextHtml = html.replace(pattern, (match, before, assetId, after) => {
+    const asset = assetsById.get(assetId);
+    if (!asset?.data) {
+      return match;
+    }
+
+    const content = normalizeAssetBuffer(asset.data);
+    if (!content.length) {
+      return match;
+    }
+
+    const cid = `signature-${assetId}@emaildrop`;
+    inlineAttachments.push({
+      filename: asset.filename || `signature-${assetId}`,
+      contentType: asset.mimeType || 'image/png',
+      content,
+      size: asset.size || content.length,
+      cid,
+      disposition: 'inline'
+    });
+
+    return `${before}cid:${cid}${after}`;
+  });
+
+  return {
+    html: nextHtml,
+    attachments: [...existingAttachments, ...inlineAttachments]
+  };
+};
+
 const createTransporter = async (emailConfig, user) => {
   switch (emailConfig.provider) {
     case 'gmail':
@@ -260,6 +360,10 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
     }
 
     const normalizedBody = normalizeEmailBody(body);
+    const inlinedSignature = await inlineSignatureImages(normalizedBody, attachments, {
+      embedImages: emailConfig.provider !== 'brevo'
+    });
+    const emailAttachments = inlinedSignature.attachments;
 
     // Add tracking pixel with multiple fallback methods
     const trackingUrl = `${process.env.APP_URL}/track/${trackingId}`;
@@ -277,7 +381,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
     const trackingMarkup = trackingEnabled
       ? trackingPixel + trackingDiv + trackingStyle
       : '';
-    const bodyWithTracking = rewriteTrackedLinks(normalizedBody + trackingMarkup, trackingId, trackingEnabled);
+    const bodyWithTracking = rewriteTrackedLinks(inlinedSignature.html + trackingMarkup, trackingId, trackingEnabled);
     
     logger.info({ 
       recipient, 
@@ -332,7 +436,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
           trackingId,
           cc: options.cc,
           bcc: options.bcc,
-          attachments
+          attachments: emailAttachments
         });
 
         // Send via Gmail API
@@ -366,10 +470,12 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
           to: recipient,
           subject,
           html: bodyWithTracking,
-          attachments: attachments.map((attachment) => ({
+          attachments: emailAttachments.map((attachment) => ({
             filename: attachment.filename,
             content: attachment.content,
-            contentType: attachment.contentType
+            contentType: attachment.contentType,
+            cid: attachment.cid,
+            contentDisposition: attachment.disposition
           })),
           headers: {
             'X-Entity-Ref-ID': trackingId,
@@ -409,11 +515,12 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             from: { email: emailConfig.config.email },
             subject,
             content: [{ type: 'text/html', value: bodyWithTracking }],
-            attachments: attachments.map((attachment) => ({
+            attachments: emailAttachments.map((attachment) => ({
               content: attachment.content.toString('base64'),
               filename: attachment.filename,
               type: attachment.contentType,
-              disposition: 'attachment'
+              disposition: attachment.disposition || 'attachment',
+              content_id: attachment.cid
             }))
           },
           {
@@ -433,7 +540,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
         formData.append('to', recipient);
         formData.append('subject', subject);
         formData.append('html', bodyWithTracking);
-        attachments.forEach((attachment) => {
+        emailAttachments.forEach((attachment) => {
           formData.append('attachment', `data:${attachment.contentType};base64,${attachment.content.toString('base64')}`);
         });
 
@@ -460,12 +567,16 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
           },
           to: [{ email: recipient }],
           subject,
-          htmlContent: bodyWithTracking,
-          attachment: attachments.map((attachment) => ({
-            name: attachment.filename,
-            content: attachment.content.toString('base64')
-          }))
+          htmlContent: bodyWithTracking
         };
+
+        if (emailAttachments.length > 0) {
+          brevoPayload.attachment = emailAttachments.map((attachment) => ({
+            name: attachment.filename,
+            content: attachment.content.toString('base64'),
+            contentId: attachment.cid
+          }));
+        }
 
         if (!emailConfig.config.apiKey) {
           throw new Error('Brevo API key is missing');
@@ -494,14 +605,29 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
           recipient,
           subjectLength: String(subject).length,
           htmlContentLength: String(bodyWithTracking).length,
-          attachmentCount: brevoPayload.attachment.length,
+          attachmentCount: emailAttachments.length,
+          inlineAttachmentCount: emailAttachments.filter((attachment) => attachment.cid).length,
+          attachmentBytes: emailAttachments.map((attachment) => attachment.content?.length || 0),
           apiKeyPresent: !!emailConfig.config.apiKey,
-          apiKeyPreview: emailConfig.config.apiKey
-            ? `${emailConfig.config.apiKey.slice(0, 6)}...${emailConfig.config.apiKey.slice(-4)}`
-            : null
+          apiKeyPreview: redactApiKey(emailConfig.config.apiKey)
         }, 'Brevo payload prepared');
 
-        await axios.post(
+        appendEmailDebugLog('brevo_payload_prepared', {
+          provider: 'brevo',
+          senderEmail: brevoPayload.sender.email,
+          senderName: brevoPayload.sender.name,
+          recipient,
+          subject,
+          subjectLength: String(subject).length,
+          htmlContentLength: String(bodyWithTracking).length,
+          attachmentCount: emailAttachments.length,
+          inlineAttachmentCount: emailAttachments.filter((attachment) => attachment.cid).length,
+          attachmentBytes: emailAttachments.map((attachment) => attachment.content?.length || 0),
+          apiKeyPresent: !!emailConfig.config.apiKey,
+          apiKeyPreview: redactApiKey(emailConfig.config.apiKey)
+        });
+
+        const brevoResponse = await axios.post(
           'https://api.brevo.com/v3/smtp/email',
           brevoPayload,
           {
@@ -511,7 +637,15 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             }
           }
         );
-        logger.info({ recipient }, '✅ Email sent successfully via Brevo');
+        logger.info({ recipient, brevoResponse: brevoResponse.data }, '✅ Email sent successfully via Brevo');
+        appendEmailDebugLog('brevo_send_success', {
+          provider: 'brevo',
+          senderEmail: brevoPayload.sender.email,
+          recipient,
+          subject,
+          providerStatus: brevoResponse.status,
+          providerResponse: brevoResponse.data
+        });
         break;
 
       default:
@@ -521,6 +655,17 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
     logger.info({ recipient, provider: emailConfig.provider }, '✅ Email sent successfully');
     return { success: true };
   } catch (error) {
+    appendEmailDebugLog('email_send_error', {
+      provider: emailConfig?.provider,
+      recipient,
+      senderEmail: emailConfig?.config?.email || user?.email || null,
+      subject,
+      errorMessage: error.message,
+      providerStatus: error.response?.status,
+      providerError: getAxiosResponseData(error),
+      apiKeyPreview: redactApiKey(emailConfig?.config?.apiKey)
+    });
+
     logger.error({ 
       err: error, 
       recipient,

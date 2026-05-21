@@ -4,6 +4,7 @@ package-lock.json
 .env*
 IgnoreThis/*
 IgnoreTHis/
+logs/
 
 # Diagnostic scripts (not needed in production)
 scripts/

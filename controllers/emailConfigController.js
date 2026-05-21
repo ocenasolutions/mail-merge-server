@@ -1,6 +1,7 @@
 const EmailConfig = require('../models/EmailConfig');
 const { testEmailConnection } = require('../services/emailService');
 const { listMailboxes, listMessages, getMessageDetail, supportsMailbox } = require('../services/mailboxService');
+const { appendEmailDebugLog } = require('../utils/emailDebugLogger');
 
 exports.getConfigs = async (req, res) => {
   try {
@@ -285,6 +286,13 @@ exports.testConfig = async (req, res) => {
       to: testEmail,
       trackingId
     });
+    appendEmailDebugLog('email_config_test_requested', {
+      configId: String(config._id),
+      provider: config.provider,
+      from: config.config.email || userWithTokens.email,
+      to: testEmail,
+      trackingId
+    });
 
     const result = await sendEmail(
       config,
@@ -307,6 +315,16 @@ exports.testConfig = async (req, res) => {
       });
     } else {
       console.log('❌ Test email failed:', result.error);
+      appendEmailDebugLog('email_config_test_failed', {
+        configId: String(config._id),
+        provider: config.provider,
+        from: config.config.email || userWithTokens.email,
+        to: testEmail,
+        trackingId,
+        error: result.error,
+        providerStatus: result.statusCode,
+        providerError: result.providerError
+      });
       res.status(500).json({ 
         success: false, 
         message: `Failed to send test email: ${result.error}`,
