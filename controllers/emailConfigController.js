@@ -309,7 +309,10 @@ exports.testConfig = async (req, res) => {
       console.log('❌ Test email failed:', result.error);
       res.status(500).json({ 
         success: false, 
-        message: `Failed to send test email: ${result.error}` 
+        message: `Failed to send test email: ${result.error}`,
+        provider: config.provider,
+        providerStatus: result.statusCode,
+        providerError: result.providerError
       });
     }
   } catch (error) {

@@ -18,6 +18,23 @@ const PROVIDER_ATTACHMENT_LIMITS = {
 
 const getAttachmentExtension = (filename = '') => filename.split('.').pop()?.toLowerCase() || '';
 const chunkBase64 = (value) => value.match(/.{1,76}/g)?.join('\r\n') || '';
+const isValidEmail = (value = '') => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value).trim());
+
+const getAxiosResponseData = (error) => error?.response?.data || null;
+
+const formatProviderError = (error) => {
+  const responseData = getAxiosResponseData(error);
+
+  if (!responseData) {
+    return error.message;
+  }
+
+  if (typeof responseData === 'string') {
+    return responseData;
+  }
+
+  return responseData.message || responseData.error || JSON.stringify(responseData);
+};
 
 const normalizeAttachments = (attachments = []) => attachments.map((attachment) => ({
   filename: attachment.filename || attachment.name,
@@ -436,21 +453,57 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
       case 'brevo':
         logger.info({ recipient }, '📤 Sending via Brevo');
         const fromName = emailConfig.config.fromName || emailConfig.config.email.split('@')[0];
+        const brevoPayload = {
+          sender: {
+            email: emailConfig.config.email,
+            name: fromName
+          },
+          to: [{ email: recipient }],
+          subject,
+          htmlContent: bodyWithTracking,
+          attachment: attachments.map((attachment) => ({
+            name: attachment.filename,
+            content: attachment.content.toString('base64')
+          }))
+        };
+
+        if (!emailConfig.config.apiKey) {
+          throw new Error('Brevo API key is missing');
+        }
+
+        if (!isValidEmail(brevoPayload.sender.email)) {
+          throw new Error(`Brevo sender email is invalid or missing: ${brevoPayload.sender.email || 'empty'}`);
+        }
+
+        if (!isValidEmail(recipient)) {
+          throw new Error(`Recipient email is invalid or missing: ${recipient || 'empty'}`);
+        }
+
+        if (!subject || !String(subject).trim()) {
+          throw new Error('Brevo subject is missing');
+        }
+
+        if (!bodyWithTracking || !String(bodyWithTracking).trim()) {
+          throw new Error('Brevo htmlContent is missing');
+        }
+
+        logger.info({
+          provider: 'brevo',
+          senderEmail: brevoPayload.sender.email,
+          senderName: brevoPayload.sender.name,
+          recipient,
+          subjectLength: String(subject).length,
+          htmlContentLength: String(bodyWithTracking).length,
+          attachmentCount: brevoPayload.attachment.length,
+          apiKeyPresent: !!emailConfig.config.apiKey,
+          apiKeyPreview: emailConfig.config.apiKey
+            ? `${emailConfig.config.apiKey.slice(0, 6)}...${emailConfig.config.apiKey.slice(-4)}`
+            : null
+        }, 'Brevo payload prepared');
+
         await axios.post(
           'https://api.brevo.com/v3/smtp/email',
-          {
-            sender: { 
-              email: emailConfig.config.email,
-              name: fromName
-            },
-            to: [{ email: recipient }],
-            subject,
-            htmlContent: bodyWithTracking,
-            attachment: attachments.map((attachment) => ({
-              name: attachment.filename,
-              content: attachment.content.toString('base64')
-            }))
-          },
+          brevoPayload,
           {
             headers: {
               'api-key': emailConfig.config.apiKey,
@@ -476,7 +529,12 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
       errorStatus: error.response?.status,
       provider: emailConfig?.provider
     }, '❌ Email send error');
-    return { success: false, error: error.message };
+    return {
+      success: false,
+      error: formatProviderError(error),
+      providerError: getAxiosResponseData(error),
+      statusCode: error.response?.status
+    };
   }
 };
 

@@ -157,7 +157,9 @@ const processCampaign = async (campaignId) => {
         logger.info({ 
           recipientEmail: recipient.email,
           success: result.success,
-          error: result.error
+          error: result.error,
+          providerError: result.providerError,
+          providerStatus: result.statusCode
         }, result.success ? '✅ Email sent successfully' : '❌ Email send failed');
 
         if (result.success) {
@@ -168,7 +170,9 @@ const processCampaign = async (campaignId) => {
           successCount++;
         } else {
           recipient.status = 'failed';
-          recipient.error = result.error;
+          recipient.error = result.providerError
+            ? `${result.error}: ${JSON.stringify(result.providerError)}`
+            : result.error;
           campaign.stats.failed += 1;
           failedCount++;
         }
