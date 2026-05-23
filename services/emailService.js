@@ -16,7 +16,8 @@ const PROVIDER_ATTACHMENT_LIMITS = {
   brevo: 20 * 1024 * 1024,
   sendgrid: 30 * 1024 * 1024,
   mailgun: 25 * 1024 * 1024,
-  godaddy: 30 * 1024 * 1024
+  godaddy: 30 * 1024 * 1024,
+  titan: 25 * 1024 * 1024
 };
 
 const getAttachmentExtension = (filename = '') => filename.split('.').pop()?.toLowerCase() || '';
@@ -336,6 +337,7 @@ const createTransporter = async (emailConfig, user) => {
     case 'hostinger':
     case 'smtp':
     case 'outlook':
+    case 'titan':
       logger.info({
         provider: emailConfig.provider,
         host: emailConfig.config.host,
@@ -493,6 +495,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
       case 'godaddy':
       case 'hostinger':
       case 'smtp':
+      case 'titan':
       case 'outlook':
         logger.info({ 
           provider: emailConfig.provider,
@@ -794,6 +797,7 @@ const testEmailConnection = async (emailConfig, user) => {
       case 'godaddy':
       case 'hostinger':
       case 'smtp':
+      case 'titan':
         const smtpTransporter = await createTransporter(emailConfig, user);
         await smtpTransporter.verify();
         return {
@@ -805,7 +809,9 @@ const testEmailConnection = async (emailConfig, user) => {
                 ? 'Hostinger SMTP connection successful'
                 : emailConfig.provider === 'outlook'
                   ? 'Outlook / Microsoft 365 SMTP connection successful'
-                  : 'SMTP connection successful'
+                  : emailConfig.provider === 'titan'
+                    ? 'Titan SMTP connection successful'
+                    : 'SMTP connection successful'
         };
 
       case 'sendgrid':

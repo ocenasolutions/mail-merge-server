@@ -4,7 +4,7 @@ const { simpleParser } = require('mailparser');
 const logger = require('../utils/logger');
 const User = require('../models/User');
 
-const MAILBOX_PROVIDERS = new Set(['gmail', 'godaddy', 'hostinger', 'smtp', 'outlook']);
+const MAILBOX_PROVIDERS = new Set(['gmail', 'godaddy', 'hostinger', 'smtp', 'outlook', 'titan']);
 
 const supportsMailbox = (emailConfig) => MAILBOX_PROVIDERS.has(emailConfig?.provider);
 
@@ -44,6 +44,8 @@ const getMailboxDefaults = (provider) => {
       return { host: 'outlook.office365.com', port: 993, secure: true, inboxPath: 'INBOX', sentPath: 'Sent Items', draftsPath: 'Drafts', trashPath: 'Deleted Items' };
     case 'hostinger':
       return { host: 'imap.hostinger.com', port: 993, secure: true, inboxPath: 'INBOX', sentPath: 'Sent', draftsPath: 'Drafts', trashPath: 'Trash' };
+    case 'titan':
+      return { host: 'imap.titan.email', port: 993, secure: true, inboxPath: 'INBOX', sentPath: 'Sent', draftsPath: 'Drafts', trashPath: 'Trash' };
     default:
       return { host: '', port: 993, secure: true, inboxPath: 'INBOX', sentPath: 'Sent', draftsPath: 'Drafts', trashPath: 'Trash' };
   }

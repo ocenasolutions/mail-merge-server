@@ -18,7 +18,8 @@ const PROVIDER_ATTACHMENT_LIMITS = {
   brevo: 20 * 1024 * 1024,
   sendgrid: 30 * 1024 * 1024,
   mailgun: 25 * 1024 * 1024,
-  godaddy: 30 * 1024 * 1024
+  godaddy: 30 * 1024 * 1024,
+  titan: 25 * 1024 * 1024
 };
 
 const getAttachmentExtension = (filename = '') => filename.split('.').pop()?.toLowerCase() || '';
