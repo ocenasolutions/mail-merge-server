@@ -12,6 +12,11 @@ const trackedEmailSchema = new mongoose.Schema({
     unique: true
   },
   providerMessageId: String,
+  provider: {
+    type: String,
+    default: 'gmail'
+  },
+  accountId: String,
   senderEmail: {
     type: String,
     required: true

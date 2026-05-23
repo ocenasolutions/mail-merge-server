@@ -164,9 +164,10 @@ const mapTrackedEmail = (trackedEmail) => ({
   openCount: trackedEmail.openCount || 0,
   clicks: trackedEmail.clickCount || 0,
   folder: 'sent',
-  accountId: 'gmail',
+  accountId: trackedEmail.accountId || 'gmail',
   accountEmail: trackedEmail.senderEmail,
-  source: 'gmail'
+  provider: trackedEmail.provider || 'gmail',
+  source: trackedEmail.provider === 'gmail' ? 'gmail' : 'api'
 });
 
 const mapGmailMessage = (message, folder, accountEmail) => {
@@ -335,7 +336,15 @@ exports.getEmails = async (req, res) => {
       });
 
     if (folder === 'sent') {
-      const trackedEmails = await TrackedEmail.find({ userId }).sort({ createdAt: -1 }).limit(100);
+      let trackedEmails = await TrackedEmail.find({ userId }).sort({ createdAt: -1 }).limit(100);
+
+      if (selectedConfig && !supportsMailbox(selectedConfig)) {
+        trackedEmails = trackedEmails.filter((item) =>
+          String(item.accountId || '') === String(selectedConfig._id) ||
+          String(item.provider || '') === String(selectedConfig.provider)
+        );
+      }
+
       const trackedByMessageId = new Map(
         trackedEmails
           .filter((item) => item.providerMessageId)
@@ -462,6 +471,8 @@ exports.sendEmail = async (req, res) => {
         userId,
         trackingId,
         providerMessageId: result.data.id,
+        provider: 'gmail',
+        accountId: 'gmail',
         senderEmail: user.email,
         recipientEmail: to,
         cc,

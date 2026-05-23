@@ -2,9 +2,10 @@ const nodemailer = require('nodemailer');
 const axios = require('axios');
 const { google } = require('googleapis');
 const logger = require('../utils/logger');
-const { appendSentMessage } = require('./mailboxService');
+const { appendSentMessage, supportsMailbox } = require('./mailboxService');
 const { appendEmailDebugLog, redactApiKey } = require('../utils/emailDebugLogger');
 const SignatureAsset = require('../models/SignatureAsset');
+const TrackedEmail = require('../models/TrackedEmail');
 
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set(['ade', 'adp', 'apk', 'appx', 'bat', 'cab', 'chm', 'cmd', 'com', 'cpl', 'diagcab', 'dll', 'dmg', 'exe', 'hta', 'ins', 'isp', 'iso', 'jar', 'js', 'jse', 'lib', 'lnk', 'mde', 'msc', 'msi', 'msp', 'mst', 'nsh', 'pif', 'ps1', 'reg', 'scr', 'sct', 'sh', 'sys', 'vb', 'vbe', 'vbs', 'vxd', 'wsc', 'wsf', 'wsh']);
 const PROVIDER_ATTACHMENT_LIMITS = {
@@ -66,13 +67,16 @@ const validateAttachments = (provider, attachments = []) => {
 };
 
 const buildGmailRawMessage = ({ from, to, subject, htmlBody, trackingId, cc, bcc, attachments = [] }) => {
-  const boundary = `emaildrop_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const mixedBoundary = `emaildrop_mixed_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const relatedBoundary = `emaildrop_related_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const inlineAttachments = attachments.filter((attachment) => attachment.cid);
+  const regularAttachments = attachments.filter((attachment) => !attachment.cid);
   const lines = [
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject}`,
     'MIME-Version: 1.0',
-    `Content-Type: multipart/mixed; boundary="${boundary}"`
+    `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`
   ];
 
   if (trackingId) {
@@ -83,14 +87,29 @@ const buildGmailRawMessage = ({ from, to, subject, htmlBody, trackingId, cc, bcc
   if (bcc) lines.push(`Bcc: ${bcc}`);
 
   lines.push('');
-  lines.push(`--${boundary}`);
+  lines.push(`--${mixedBoundary}`);
+  lines.push(`Content-Type: multipart/related; boundary="${relatedBoundary}"`);
+  lines.push('');
+  lines.push(`--${relatedBoundary}`);
   lines.push('Content-Type: text/html; charset=utf-8');
   lines.push('Content-Transfer-Encoding: 7bit');
   lines.push('');
   lines.push(htmlBody);
 
-  attachments.forEach((attachment) => {
-    lines.push(`--${boundary}`);
+  inlineAttachments.forEach((attachment) => {
+    lines.push(`--${relatedBoundary}`);
+    lines.push(`Content-Type: ${attachment.contentType}; name="${attachment.filename}"`);
+    lines.push(`Content-ID: <${attachment.cid}>`);
+    lines.push(`Content-Disposition: inline; filename="${attachment.filename}"`);
+    lines.push('Content-Transfer-Encoding: base64');
+    lines.push('');
+    lines.push(chunkBase64(attachment.content.toString('base64')));
+  });
+
+  lines.push(`--${relatedBoundary}--`);
+
+  regularAttachments.forEach((attachment) => {
+    lines.push(`--${mixedBoundary}`);
     lines.push(`Content-Type: ${attachment.contentType}; name="${attachment.filename}"`);
     if (attachment.cid) {
       lines.push(`Content-ID: <${attachment.cid}>`);
@@ -101,7 +120,7 @@ const buildGmailRawMessage = ({ from, to, subject, htmlBody, trackingId, cc, bcc
     lines.push(chunkBase64(attachment.content.toString('base64')));
   });
 
-  lines.push(`--${boundary}--`);
+  lines.push(`--${mixedBoundary}--`);
   lines.push('');
 
   return Buffer.from(lines.join('\r\n'))
@@ -172,6 +191,25 @@ const normalizeEmailBody = (body) => {
     .map((paragraph) => `<p>${paragraph.replace(/\r?\n/g, '<br>')}</p>`)
     .join('');
 };
+
+const stripHtmlForPreview = (value = '') => String(value)
+  .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+  .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+  .replace(/<br\s*\/?>(?=)/gi, '\n')
+  .replace(/<\/p>/gi, '\n')
+  .replace(/<\/div>/gi, '\n')
+  .replace(/<\/li>/gi, '\n')
+  .replace(/<[^>]+>/g, ' ')
+  .replace(/&nbsp;/gi, ' ')
+  .replace(/&amp;/gi, '&')
+  .replace(/&lt;/gi, '<')
+  .replace(/&gt;/gi, '>')
+  .replace(/&quot;/gi, '"')
+  .replace(/&#39;/gi, "'")
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const buildSentEmailContent = (html = '') => stripHtmlForPreview(html).slice(0, 1000);
 
 const escapeAttribute = (value) => String(value)
   .replace(/&/g, '&amp;')
@@ -361,9 +399,11 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
 
     const normalizedBody = normalizeEmailBody(body);
     const inlinedSignature = await inlineSignatureImages(normalizedBody, attachments, {
-      embedImages: emailConfig.provider !== 'brevo'
+      embedImages: true
     });
     const emailAttachments = inlinedSignature.attachments;
+    let providerMessageId = null;
+    const shouldStoreLocalSentEmail = !supportsMailbox(emailConfig);
 
     // Add tracking pixel with multiple fallback methods
     const trackingUrl = `${process.env.APP_URL}/track/${trackingId}`;
@@ -637,6 +677,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             }
           }
         );
+        providerMessageId = brevoResponse.data?.messageId || brevoResponse.data?.id || null;
         logger.info({ recipient, brevoResponse: brevoResponse.data }, '✅ Email sent successfully via Brevo');
         appendEmailDebugLog('brevo_send_success', {
           provider: 'brevo',
@@ -650,6 +691,38 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
 
       default:
         throw new Error('Unsupported email provider');
+    }
+
+    if (shouldStoreLocalSentEmail && trackingId) {
+      try {
+        await TrackedEmail.findOneAndUpdate(
+          { trackingId },
+          {
+            $set: {
+              userId: user._id,
+              trackingId,
+              providerMessageId,
+              provider: emailConfig.provider,
+              accountId: String(emailConfig._id || ''),
+              senderEmail: emailConfig.config?.email || user.email,
+              recipientEmail: recipient,
+              cc: options.cc,
+              bcc: options.bcc,
+              subject: subject || '(No Subject)',
+              content: buildSentEmailContent(bodyWithTracking),
+              trackingEnabled,
+              openCount: 0,
+              clickCount: 0,
+              firstOpenedAt: null,
+              lastOpenedAt: null,
+              clicks: []
+            }
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+      } catch (persistError) {
+        logger.warn({ err: persistError, recipient, provider: emailConfig.provider }, 'Could not store local sent email');
+      }
     }
 
     logger.info({ recipient, provider: emailConfig.provider }, '✅ Email sent successfully');
