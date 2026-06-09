@@ -10,6 +10,7 @@ const pinoHttp = require('pino-http');
 const logger = require('./utils/logger');
 
 const app = express();
+const jsonBodyLimit = process.env.JSON_BODY_LIMIT || '5mb';
 
 // Pino HTTP logger middleware
 app.use(pinoHttp({
@@ -69,8 +70,8 @@ app.use(cors({
   },
   credentials: true
 }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: jsonBodyLimit }));
+app.use(express.urlencoded({ extended: true, limit: jsonBodyLimit }));
 app.use(cookieParser());
 app.use(passport.initialize());
 
