@@ -67,17 +67,95 @@ const validateAttachments = (provider, attachments = []) => {
   return normalizedAttachments;
 };
 
-const buildGmailRawMessage = ({ from, to, subject, htmlBody, trackingId, cc, bcc, attachments = [] }) => {
+const buildPlainTextBody = (html = '') => String(html)
+  .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+  .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+  .replace(/<\s*br\s*\/?>/gi, '\n')
+  .replace(/<\/p>/gi, '\n')
+  .replace(/<\/div>/gi, '\n')
+  .replace(/<\/li>/gi, '\n')
+  .replace(/<\/tr>/gi, '\n')
+  .replace(/<\/h[1-6]>/gi, '\n')
+  .replace(/<li\b[^>]*>/gi, '- ')
+  .replace(/<[^>]+>/g, ' ')
+  .replace(/&nbsp;/gi, ' ')
+  .replace(/&amp;/gi, '&')
+  .replace(/&lt;/gi, '<')
+  .replace(/&gt;/gi, '>')
+  .replace(/&quot;/gi, '"')
+  .replace(/&#39;/gi, "'")
+  .replace(/\r/g, '')
+  .replace(/[ \t]+\n/g, '\n')
+  .replace(/\n[ \t]+/g, '\n')
+  .replace(/\n{3,}/g, '\n\n')
+  .replace(/[ \t]{2,}/g, ' ')
+  .trim();
+
+const appendMimePartHeader = (lines, boundary, headers, body) => {
+  lines.push(`--${boundary}`);
+
+  headers.forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      lines.push(`${key}: ${value}`);
+    }
+  });
+
+  lines.push('');
+
+  if (body !== undefined) {
+    lines.push(body || '');
+  }
+};
+
+const appendMultipartAlternative = (lines, boundary, textBody, htmlBody) => {
+  appendMimePartHeader(lines, boundary, [
+    ['Content-Type', 'text/plain; charset=utf-8'],
+    ['Content-Transfer-Encoding', '7bit']
+  ], textBody);
+
+  appendMimePartHeader(lines, boundary, [
+    ['Content-Type', 'text/html; charset=utf-8'],
+    ['Content-Transfer-Encoding', '7bit']
+  ], htmlBody);
+
+  lines.push(`--${boundary}--`);
+};
+
+const appendAttachmentPart = (lines, boundary, attachment) => {
+  const disposition = attachment.disposition || (attachment.cid ? 'inline' : 'attachment');
+
+  appendMimePartHeader(lines, boundary, [
+    ['Content-Type', `${attachment.contentType}; name="${attachment.filename}"`],
+    ...(attachment.cid ? [['Content-ID', `<${attachment.cid}>`]] : []),
+    ['Content-Disposition', `${disposition}; filename="${attachment.filename}"`],
+    ['Content-Transfer-Encoding', 'base64']
+  ], chunkBase64(attachment.content.toString('base64')));
+};
+
+const buildGmailRawMessage = ({ from, to, subject, textBody, htmlBody, trackingId, cc, bcc, attachments = [] }) => {
   const mixedBoundary = `emaildrop_mixed_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const relatedBoundary = `emaildrop_related_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const alternativeBoundary = `emaildrop_alternative_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const inlineAttachments = attachments.filter((attachment) => attachment.cid);
   const regularAttachments = attachments.filter((attachment) => !attachment.cid);
+  const hasInlineAttachments = inlineAttachments.length > 0;
+  const hasRegularAttachments = regularAttachments.length > 0;
+  const outerBoundary = hasRegularAttachments
+    ? mixedBoundary
+    : hasInlineAttachments
+      ? relatedBoundary
+      : alternativeBoundary;
+  const outerType = hasRegularAttachments
+    ? 'multipart/mixed'
+    : hasInlineAttachments
+      ? 'multipart/related'
+      : 'multipart/alternative';
   const lines = [
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject}`,
     'MIME-Version: 1.0',
-    `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`
+    `Content-Type: ${outerType}; boundary="${outerBoundary}"`
   ];
 
   if (trackingId) {
@@ -88,40 +166,49 @@ const buildGmailRawMessage = ({ from, to, subject, htmlBody, trackingId, cc, bcc
   if (bcc) lines.push(`Bcc: ${bcc}`);
 
   lines.push('');
-  lines.push(`--${mixedBoundary}`);
-  lines.push(`Content-Type: multipart/related; boundary="${relatedBoundary}"`);
-  lines.push('');
-  lines.push(`--${relatedBoundary}`);
-  lines.push('Content-Type: text/html; charset=utf-8');
-  lines.push('Content-Transfer-Encoding: 7bit');
-  lines.push('');
-  lines.push(htmlBody);
 
-  inlineAttachments.forEach((attachment) => {
-    lines.push(`--${relatedBoundary}`);
-    lines.push(`Content-Type: ${attachment.contentType}; name="${attachment.filename}"`);
-    lines.push(`Content-ID: <${attachment.cid}>`);
-    lines.push(`Content-Disposition: inline; filename="${attachment.filename}"`);
-    lines.push('Content-Transfer-Encoding: base64');
-    lines.push('');
-    lines.push(chunkBase64(attachment.content.toString('base64')));
-  });
+  if (hasRegularAttachments) {
+    if (hasInlineAttachments) {
+      appendMimePartHeader(lines, mixedBoundary, [
+        ['Content-Type', `multipart/related; boundary="${relatedBoundary}"`]
+      ]);
+      appendMimePartHeader(lines, relatedBoundary, [
+        ['Content-Type', `multipart/alternative; boundary="${alternativeBoundary}"`]
+      ]);
+      appendMultipartAlternative(lines, alternativeBoundary, textBody, htmlBody);
 
-  lines.push(`--${relatedBoundary}--`);
+      inlineAttachments.forEach((attachment) => {
+        appendAttachmentPart(lines, relatedBoundary, attachment);
+      });
 
-  regularAttachments.forEach((attachment) => {
-    lines.push(`--${mixedBoundary}`);
-    lines.push(`Content-Type: ${attachment.contentType}; name="${attachment.filename}"`);
-    if (attachment.cid) {
-      lines.push(`Content-ID: <${attachment.cid}>`);
+      lines.push(`--${relatedBoundary}--`);
+    } else {
+      appendMimePartHeader(lines, mixedBoundary, [
+        ['Content-Type', `multipart/alternative; boundary="${alternativeBoundary}"`]
+      ]);
+      appendMultipartAlternative(lines, alternativeBoundary, textBody, htmlBody);
     }
-    lines.push(`Content-Disposition: ${attachment.disposition || 'attachment'}; filename="${attachment.filename}"`);
-    lines.push('Content-Transfer-Encoding: base64');
-    lines.push('');
-    lines.push(chunkBase64(attachment.content.toString('base64')));
-  });
 
-  lines.push(`--${mixedBoundary}--`);
+    regularAttachments.forEach((attachment) => {
+      appendAttachmentPart(lines, mixedBoundary, attachment);
+    });
+
+    lines.push(`--${mixedBoundary}--`);
+  } else if (hasInlineAttachments) {
+    appendMimePartHeader(lines, relatedBoundary, [
+      ['Content-Type', `multipart/alternative; boundary="${alternativeBoundary}"`]
+    ]);
+    appendMultipartAlternative(lines, alternativeBoundary, textBody, htmlBody);
+
+    inlineAttachments.forEach((attachment) => {
+      appendAttachmentPart(lines, relatedBoundary, attachment);
+    });
+
+    lines.push(`--${relatedBoundary}--`);
+  } else {
+    appendMultipartAlternative(lines, alternativeBoundary, textBody, htmlBody);
+  }
+
   lines.push('');
 
   return Buffer.from(lines.join('\r\n'))
@@ -406,32 +493,35 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
     const emailAttachments = inlinedSignature.attachments;
     let providerMessageId = null;
     const shouldStoreLocalSentEmail = !supportsMailbox(emailConfig);
+    const activeTrackingId = trackingEnabled ? trackingId : null;
+    const plainTextBody = buildPlainTextBody(inlinedSignature.html);
 
     // Add tracking pixel with multiple fallback methods
-    const trackingUrl = `${process.env.APP_URL}/track/${trackingId}`;
+    const trackingUrl = activeTrackingId ? `${process.env.APP_URL}/track/${activeTrackingId}` : null;
     
     // Method 1: Standard img tag
-    const trackingPixel = `<img src="${trackingUrl}" width="1" height="1" alt="" style="display:block;border:0;outline:none;" />`;
+    const trackingPixel = trackingUrl ? `<img src="${trackingUrl}" width="1" height="1" alt="" style="display:block;border:0;outline:none;" />` : '';
     
     // Method 2: Background image in a div (some email clients load this)
-    const trackingDiv = `<div style="background-image:url('${trackingUrl}');width:1px;height:1px;"></div>`;
+    const trackingDiv = trackingUrl ? `<div style="background-image:url('${trackingUrl}');width:1px;height:1px;"></div>` : '';
     
     // Method 3: CSS background (another fallback)
-    const trackingStyle = `<table cellpadding="0" cellspacing="0" border="0" style="width:1px;height:1px;"><tr><td style="background:url('${trackingUrl}') no-repeat;width:1px;height:1px;"></td></tr></table>`;
+    const trackingStyle = trackingUrl ? `<table cellpadding="0" cellspacing="0" border="0" style="width:1px;height:1px;"><tr><td style="background:url('${trackingUrl}') no-repeat;width:1px;height:1px;"></td></tr></table>` : '';
     
     // Add all tracking methods + optional view in browser link
     const trackingMarkup = trackingEnabled
       ? trackingPixel + trackingDiv + trackingStyle
       : '';
-    const bodyWithTracking = rewriteTrackedLinks(inlinedSignature.html + trackingMarkup, trackingId, trackingEnabled);
+    const bodyWithTracking = rewriteTrackedLinks(inlinedSignature.html + trackingMarkup, activeTrackingId, trackingEnabled);
     
     logger.info({ 
       recipient, 
       trackingUrl,
+      trackingEnabled,
       provider: emailConfig.provider,
       emailConfigEmail: emailConfig.config?.email,
       userEmail: user.email
-    }, '📧 Sending email with tracking pixel');
+    }, '📧 Sending email payload');
 
     switch (emailConfig.provider) {
       case 'gmail':
@@ -474,8 +564,9 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
           from: fromEmail,
           to: recipient,
           subject,
+          textBody: plainTextBody,
           htmlBody: bodyWithTracking,
-          trackingId,
+          trackingId: activeTrackingId,
           cc: options.cc,
           bcc: options.bcc,
           attachments: emailAttachments
@@ -512,6 +603,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
           from: emailConfig.config.email || user.email,
           to: recipient,
           subject,
+          text: plainTextBody,
           html: bodyWithTracking,
           attachments: emailAttachments.map((attachment) => ({
             filename: attachment.filename,
@@ -519,12 +611,15 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             contentType: attachment.contentType,
             cid: attachment.cid,
             contentDisposition: attachment.disposition
-          })),
-          headers: {
-            'X-Entity-Ref-ID': trackingId,
-            'List-Unsubscribe': `<${process.env.APP_URL}/unsubscribe/${trackingId}>`,
-          }
+          }))
         };
+
+        if (activeTrackingId) {
+          mailOptions.headers = {
+            'X-Entity-Ref-ID': activeTrackingId,
+            'List-Unsubscribe': `<${process.env.APP_URL}/unsubscribe/${activeTrackingId}>`,
+          };
+        }
 
         logger.info({ 
           from: mailOptions.from,
@@ -557,7 +652,10 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
             personalizations: [{ to: [{ email: recipient }] }],
             from: { email: emailConfig.config.email },
             subject,
-            content: [{ type: 'text/html', value: bodyWithTracking }],
+            content: [
+              { type: 'text/plain', value: plainTextBody },
+              { type: 'text/html', value: bodyWithTracking }
+            ],
             attachments: emailAttachments.map((attachment) => ({
               content: attachment.content.toString('base64'),
               filename: attachment.filename,
@@ -582,6 +680,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
         formData.append('from', emailConfig.config.email);
         formData.append('to', recipient);
         formData.append('subject', subject);
+        formData.append('text', plainTextBody);
         formData.append('html', bodyWithTracking);
         emailAttachments.forEach((attachment) => {
           formData.append('attachment', `data:${attachment.contentType};base64,${attachment.content.toString('base64')}`);
@@ -610,6 +709,7 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
           },
           to: [{ email: recipient }],
           subject,
+          textContent: plainTextBody,
           htmlContent: bodyWithTracking
         };
 
@@ -696,33 +796,35 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
         throw new Error('Unsupported email provider');
     }
 
-    if (shouldStoreLocalSentEmail && trackingId) {
+    if (shouldStoreLocalSentEmail) {
       try {
-        await TrackedEmail.findOneAndUpdate(
-          { trackingId },
-          {
-            $set: {
-              userId: user._id,
-              trackingId,
-              providerMessageId,
-              provider: emailConfig.provider,
-              accountId: String(emailConfig._id || ''),
-              senderEmail: emailConfig.config?.email || user.email,
-              recipientEmail: recipient,
-              cc: options.cc,
-              bcc: options.bcc,
-              subject: subject || '(No Subject)',
-              content: buildSentEmailContent(bodyWithTracking),
-              trackingEnabled,
-              openCount: 0,
-              clickCount: 0,
-              firstOpenedAt: null,
-              lastOpenedAt: null,
-              clicks: []
-            }
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        if (activeTrackingId) {
+          await TrackedEmail.findOneAndUpdate(
+            { trackingId: activeTrackingId },
+            {
+              $set: {
+                userId: user._id,
+                trackingId: activeTrackingId,
+                providerMessageId,
+                provider: emailConfig.provider,
+                accountId: String(emailConfig._id || ''),
+                senderEmail: emailConfig.config?.email || user.email,
+                recipientEmail: recipient,
+                cc: options.cc,
+                bcc: options.bcc,
+                subject: subject || '(No Subject)',
+                content: buildSentEmailContent(bodyWithTracking),
+                trackingEnabled,
+                openCount: 0,
+                clickCount: 0,
+                firstOpenedAt: null,
+                lastOpenedAt: null,
+                clicks: []
+              }
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+          );
+        }
       } catch (persistError) {
         logger.warn({ err: persistError, recipient, provider: emailConfig.provider }, 'Could not store local sent email');
       }

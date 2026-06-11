@@ -14,14 +14,101 @@ const getAttachmentExtension = (filename = '') => filename.split('.').pop()?.toL
 
 const chunkBase64 = (value) => value.match(/.{1,76}/g)?.join('\r\n') || '';
 
-const buildGmailRawMessage = ({ from, to, cc, bcc, subject, htmlBody, trackingId, attachments = [] }) => {
-  const boundary = `emaildrop_${crypto.randomBytes(12).toString('hex')}`;
+const buildPlainTextBody = (html = '') => String(html)
+  .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+  .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+  .replace(/<\s*br\s*\/?>/gi, '\n')
+  .replace(/<\/p>/gi, '\n')
+  .replace(/<\/div>/gi, '\n')
+  .replace(/<\/li>/gi, '\n')
+  .replace(/<\/tr>/gi, '\n')
+  .replace(/<\/h[1-6]>/gi, '\n')
+  .replace(/<li\b[^>]*>/gi, '- ')
+  .replace(/<[^>]+>/g, ' ')
+  .replace(/&nbsp;/gi, ' ')
+  .replace(/&amp;/gi, '&')
+  .replace(/&lt;/gi, '<')
+  .replace(/&gt;/gi, '>')
+  .replace(/&quot;/gi, '"')
+  .replace(/&#39;/gi, "'")
+  .replace(/\r/g, '')
+  .replace(/[ \t]+\n/g, '\n')
+  .replace(/\n[ \t]+/g, '\n')
+  .replace(/\n{3,}/g, '\n\n')
+  .replace(/[ \t]{2,}/g, ' ')
+  .trim();
+
+const appendMimePartHeader = (lines, boundary, headers, body) => {
+  lines.push(`--${boundary}`);
+
+  headers.forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      lines.push(`${key}: ${value}`);
+    }
+  });
+
+  lines.push('');
+
+  if (body !== undefined) {
+    lines.push(body || '');
+  }
+};
+
+const appendMultipartAlternative = (lines, boundary, textBody, htmlBody) => {
+  appendMimePartHeader(lines, boundary, [
+    ['Content-Type', 'text/plain; charset=utf-8'],
+    ['Content-Transfer-Encoding', '7bit']
+  ], textBody);
+
+  appendMimePartHeader(lines, boundary, [
+    ['Content-Type', 'text/html; charset=utf-8'],
+    ['Content-Transfer-Encoding', '7bit']
+  ], htmlBody);
+
+  lines.push(`--${boundary}--`);
+};
+
+const appendAttachmentPart = (lines, boundary, attachment) => {
+  const filename = attachment.originalname || attachment.filename || 'attachment';
+  const contentType = attachment.mimetype || attachment.contentType || 'application/octet-stream';
+  const base64Content = chunkBase64(
+    Buffer.isBuffer(attachment.buffer)
+      ? attachment.buffer.toString('base64')
+      : Buffer.from(attachment.contentBase64 || '', 'base64').toString('base64')
+  );
+
+  appendMimePartHeader(lines, boundary, [
+    ['Content-Type', `${contentType}; name="${filename}"`],
+    ...(attachment.cid ? [['Content-ID', `<${attachment.cid}>`]] : []),
+    ['Content-Disposition', `${attachment.disposition || (attachment.cid ? 'inline' : 'attachment')}; filename="${filename}"`],
+    ['Content-Transfer-Encoding', 'base64']
+  ], base64Content);
+};
+
+const buildGmailRawMessage = ({ from, to, cc, bcc, subject, textBody, htmlBody, trackingId, attachments = [] }) => {
+  const mixedBoundary = `emaildrop_mixed_${crypto.randomBytes(12).toString('hex')}`;
+  const relatedBoundary = `emaildrop_related_${crypto.randomBytes(12).toString('hex')}`;
+  const alternativeBoundary = `emaildrop_alternative_${crypto.randomBytes(12).toString('hex')}`;
+  const inlineAttachments = attachments.filter((attachment) => attachment.cid);
+  const regularAttachments = attachments.filter((attachment) => !attachment.cid);
+  const hasInlineAttachments = inlineAttachments.length > 0;
+  const hasRegularAttachments = regularAttachments.length > 0;
+  const outerBoundary = hasRegularAttachments
+    ? mixedBoundary
+    : hasInlineAttachments
+      ? relatedBoundary
+      : alternativeBoundary;
+  const outerType = hasRegularAttachments
+    ? 'multipart/mixed'
+    : hasInlineAttachments
+      ? 'multipart/related'
+      : 'multipart/alternative';
   const lines = [
     `From: ${from}`,
     `To: ${to}`,
     subject ? `Subject: ${subject}` : 'Subject: (No Subject)',
     'MIME-Version: 1.0',
-    `Content-Type: multipart/mixed; boundary="${boundary}"`
+    `Content-Type: ${outerType}; boundary="${outerBoundary}"`
   ];
 
   if (trackingId) {
@@ -32,23 +119,49 @@ const buildGmailRawMessage = ({ from, to, cc, bcc, subject, htmlBody, trackingId
   if (bcc) lines.push(`Bcc: ${bcc}`);
 
   lines.push('');
-  lines.push(`--${boundary}`);
-  lines.push('Content-Type: text/html; charset=utf-8');
-  lines.push('Content-Transfer-Encoding: 7bit');
-  lines.push('');
-  lines.push(htmlBody);
 
-  attachments.forEach((attachment) => {
-    const base64Content = chunkBase64(attachment.buffer.toString('base64'));
-    lines.push(`--${boundary}`);
-    lines.push(`Content-Type: ${attachment.mimetype || 'application/octet-stream'}; name="${attachment.originalname}"`);
-    lines.push(`Content-Disposition: attachment; filename="${attachment.originalname}"`);
-    lines.push('Content-Transfer-Encoding: base64');
-    lines.push('');
-    lines.push(base64Content);
-  });
+  if (hasRegularAttachments) {
+    if (hasInlineAttachments) {
+      appendMimePartHeader(lines, mixedBoundary, [
+        ['Content-Type', `multipart/related; boundary="${relatedBoundary}"`]
+      ]);
+      appendMimePartHeader(lines, relatedBoundary, [
+        ['Content-Type', `multipart/alternative; boundary="${alternativeBoundary}"`]
+      ]);
+      appendMultipartAlternative(lines, alternativeBoundary, textBody, htmlBody);
 
-  lines.push(`--${boundary}--`);
+      inlineAttachments.forEach((attachment) => {
+        appendAttachmentPart(lines, relatedBoundary, attachment);
+      });
+
+      lines.push(`--${relatedBoundary}--`);
+    } else {
+      appendMimePartHeader(lines, mixedBoundary, [
+        ['Content-Type', `multipart/alternative; boundary="${alternativeBoundary}"`]
+      ]);
+      appendMultipartAlternative(lines, alternativeBoundary, textBody, htmlBody);
+    }
+
+    regularAttachments.forEach((attachment) => {
+      appendAttachmentPart(lines, mixedBoundary, attachment);
+    });
+
+    lines.push(`--${mixedBoundary}--`);
+  } else if (hasInlineAttachments) {
+    appendMimePartHeader(lines, relatedBoundary, [
+      ['Content-Type', `multipart/alternative; boundary="${alternativeBoundary}"`]
+    ]);
+    appendMultipartAlternative(lines, alternativeBoundary, textBody, htmlBody);
+
+    inlineAttachments.forEach((attachment) => {
+      appendAttachmentPart(lines, relatedBoundary, attachment);
+    });
+
+    lines.push(`--${relatedBoundary}--`);
+  } else {
+    appendMultipartAlternative(lines, alternativeBoundary, textBody, htmlBody);
+  }
+
   lines.push('');
 
   return Buffer.from(lines.join('\r\n'))
@@ -430,6 +543,7 @@ exports.sendEmail = async (req, res) => {
       ? user.settings.signature.html
       : '';
     const htmlBody = buildTrackedBody(`${content || ''}${signatureHtml}`, trackingId, !!isTracked);
+    const plainTextBody = buildPlainTextBody(htmlBody);
     const totalAttachmentBytes = attachments.reduce((sum, file) => sum + (file.size || 0), 0);
 
     const blockedFile = attachments.find((file) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(file.originalname)));
@@ -453,6 +567,7 @@ exports.sendEmail = async (req, res) => {
       cc,
       bcc,
       subject,
+      textBody: plainTextBody,
       htmlBody,
       trackingId,
       attachments
