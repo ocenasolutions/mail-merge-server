@@ -2,6 +2,22 @@ const Campaign = require('../models/Campaign');
 const Recipient = require('../models/Recipient');
 const Tracking = require('../models/Tracking');
 const { syncUserReplyStats } = require('../services/replyTrackingService');
+const { syncAllCampaignStatsForUser } = require('../services/campaignStatsService');
+
+const lastSyncMap = new Map();
+
+const throttleSync = async (userId) => {
+  const now = Date.now();
+  const lastSync = lastSyncMap.get(String(userId)) || 0;
+  // Limit on-demand syncs to once every 5 minutes (300,000 ms) per user
+  if (now - lastSync > 5 * 60 * 1000) {
+    lastSyncMap.set(String(userId), now);
+    await Promise.all([
+      syncAllCampaignStatsForUser(userId).catch(() => null),
+      syncUserReplyStats(userId).catch(() => null)
+    ]);
+  }
+};
 
 const withRates = (sent, opened, clicked, bounced, replied) => ({
   openRate: sent > 0 ? Number(((opened / sent) * 100).toFixed(2)) : 0,
@@ -42,7 +58,7 @@ const filterCampaignsByAccount = (campaigns, accountId, userEmail) => {
 exports.getDashboardStats = async (req, res) => {
   try {
     const userId = req.user._id;
-    await syncUserReplyStats(userId).catch(() => null);
+    await throttleSync(userId);
 
     const campaigns = filterCampaignsByAccount(
       await Campaign.find({ userId }).populate('emailConfigId', 'email config.email'),
@@ -86,7 +102,7 @@ exports.getDashboardStats = async (req, res) => {
 
 exports.getCampaignStats = async (req, res) => {
   try {
-    await syncUserReplyStats(req.user._id).catch(() => null);
+    await throttleSync(req.user._id);
 
     const campaign = await Campaign.findOne({
       _id: req.params.id,
@@ -144,6 +160,7 @@ exports.getCampaignStats = async (req, res) => {
 
 exports.getRecentClicks = async (req, res) => {
   try {
+    await throttleSync(req.user._id);
     const campaigns = filterCampaignsByAccount(
       await Campaign.find({ userId: req.user._id })
       .populate('emailConfigId', 'email config.email')
@@ -186,7 +203,7 @@ exports.getRecentClicks = async (req, res) => {
 
 exports.getRecentActivity = async (req, res) => {
   try {
-    await syncUserReplyStats(req.user._id).catch(() => null);
+    await throttleSync(req.user._id);
 
     const campaigns = filterCampaignsByAccount(
       await Campaign.find({ userId: req.user._id })
@@ -277,7 +294,7 @@ exports.getRecentOpens = async (req, res) => {
 
 exports.getLeads = async (req, res) => {
   try {
-    await syncUserReplyStats(req.user._id).catch(() => null);
+    await throttleSync(req.user._id);
 
     const campaigns = filterCampaignsByAccount(
       await Campaign.find({ userId: req.user._id })
@@ -320,7 +337,7 @@ exports.getLeads = async (req, res) => {
 
 exports.getFollowUps = async (req, res) => {
   try {
-    await syncUserReplyStats(req.user._id).catch(() => null);
+    await throttleSync(req.user._id);
     const MIN_DAYS_BEFORE_FOLLOW_UP = Math.max(1, Number(req.user?.settings?.followUpDelayDays || 1));
 
     const campaigns = filterCampaignsByAccount(

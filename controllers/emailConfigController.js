@@ -183,13 +183,24 @@ exports.testConnection = async (req, res) => {
     // For Gmail, we need the full user object with OAuth tokens
     const User = require('../models/User');
     const userWithTokens = await User.findById(req.user._id);
+    const submittedAccount = req.body?.account || {};
+    const mergedConfig = config.toObject ? config.toObject() : { ...config };
 
-    const result = await testEmailConnection(config, userWithTokens);
+    if (submittedAccount && typeof submittedAccount === 'object') {
+      mergedConfig.config = {
+        ...(mergedConfig.config || {}),
+        ...submittedAccount,
+      };
 
-    if (result.success) {
-      config.verified = true;
-      await config.save();
+      if (submittedAccount.email) {
+        mergedConfig.email = submittedAccount.email;
+      }
     }
+
+    const result = await testEmailConnection(mergedConfig, userWithTokens);
+
+    config.verified = !!result.success;
+    await config.save();
 
     res.json(result);
   } catch (error) {

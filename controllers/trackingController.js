@@ -83,6 +83,15 @@ exports.trackOpen = async (req, res) => {
 
     const now = new Date();
 
+    // Basic security bot filter: if opened within 2 seconds of sending, ignore the tracking hit
+    if (target.type === 'campaign' && target.recipient && target.recipient.sentAt) {
+      const msSinceSent = now.getTime() - new Date(target.recipient.sentAt).getTime();
+      if (msSinceSent < 2000) {
+        logger.info({ trackingId, msSinceSent, userAgent }, '⚠️ Ignoring potential security bot auto-open (< 2s after sending)');
+        return sendPixel(res);
+      }
+    }
+
     if (target.type === 'campaign') {
       target.tracking.opens.push({
         timestamp: now,
@@ -180,16 +189,49 @@ exports.trackClick = async (req, res) => {
     if (target.type === 'campaign') {
       target.tracking.clicks.push(clickEvent);
       target.tracking.clickCount += 1;
+
+      // Click implies Open: if the email has never been marked as opened, mark it now
+      let clickInitiatedOpen = false;
+      if (target.tracking.openCount === 0) {
+        target.tracking.opens.push({
+          timestamp: now,
+          userAgent: req.headers['user-agent'] || '',
+          ip: req.ip
+        });
+        target.tracking.openCount = 1;
+        target.tracking.firstOpenedAt = now;
+        target.tracking.lastOpenedAt = now;
+        clickInitiatedOpen = true;
+      }
+
       await target.tracking.save();
 
       const campaign = await Campaign.findById(target.recipient.campaignId);
-      if (campaign && target.tracking.clickCount === 1) {
-        campaign.stats.clicked += 1;
-        await campaign.save();
+      if (campaign) {
+        let needsSave = false;
+        if (target.tracking.clickCount === 1) {
+          campaign.stats.clicked += 1;
+          needsSave = true;
+        }
+        if (clickInitiatedOpen) {
+          campaign.stats.opened += 1;
+          needsSave = true;
+        }
+        if (needsSave) {
+          await campaign.save();
+        }
       }
     } else {
       target.trackedEmail.clicks.push(clickEvent);
       target.trackedEmail.clickCount += 1;
+
+      // Click implies Open for single email as well
+      if (target.trackedEmail.openCount === 0) {
+        target.trackedEmail.openCount = 1;
+        target.trackedEmail.firstOpenedAt = now;
+        target.trackedEmail.lastOpenedAt = now;
+      }
+
       await target.trackedEmail.save();
     }
 

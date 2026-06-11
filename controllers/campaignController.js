@@ -4,6 +4,7 @@ const EmailConfig = require('../models/EmailConfig');
 const Tracking = require('../models/Tracking');
 const User = require('../models/User');
 const { mergeTags, sendEmail } = require('../services/emailService');
+const { syncCampaignStats, syncAllCampaignStatsForUser } = require('../services/campaignStatsService');
 const crypto = require('crypto');
 const axios = require('axios');
 const { syncUserReplyStats } = require('../services/replyTrackingService');
@@ -75,6 +76,7 @@ const resolveCampaignEmailConfig = async (userId) => {
 
 exports.getCampaigns = async (req, res) => {
   try {
+    await syncAllCampaignStatsForUser(req.user._id).catch(() => null);
     await syncUserReplyStats(req.user._id).catch(() => null);
 
     const campaigns = await Campaign.find({ userId: req.user._id })
@@ -85,12 +87,31 @@ exports.getCampaigns = async (req, res) => {
     const recipients = await Recipient.find({ campaignId: { $in: campaignIds } })
       .sort({ createdAt: 1 });
     const trackingDocs = await Tracking.find({ campaignId: { $in: campaignIds } })
-      .select('campaignId openCount clickCount');
+      .select('campaignId recipientId openCount clickCount firstOpenedAt lastOpenedAt opens clicks');
 
     const recipientsByCampaign = new Map();
+    const trackingByRecipient = new Map();
     const liveStatsByCampaign = new Map();
 
     for (const tracking of trackingDocs) {
+      trackingByRecipient.set(String(tracking.recipientId), {
+        openCount: tracking.openCount || 0,
+        clickCount: tracking.clickCount || 0,
+        firstOpenedAt: tracking.firstOpenedAt || null,
+        lastOpenedAt: tracking.lastOpenedAt || null,
+        opens: Array.isArray(tracking.opens) ? tracking.opens.map((open) => ({
+          timestamp: open.timestamp || null,
+          userAgent: open.userAgent || '',
+          ip: open.ip || ''
+        })) : [],
+        clicks: Array.isArray(tracking.clicks) ? tracking.clicks.map((click) => ({
+          url: click.url || '',
+          timestamp: click.timestamp || null,
+          userAgent: click.userAgent || '',
+          ip: click.ip || ''
+        })) : []
+      });
+
       const key = String(tracking.campaignId);
       const current = liveStatsByCampaign.get(key) || { opened: 0, clicked: 0, replied: 0 };
 
@@ -116,7 +137,9 @@ exports.getCampaigns = async (req, res) => {
         name: mergeData.name || recipient.email,
         company: mergeData.company || '',
         email: recipient.email,
-        status: recipient.status
+        status: recipient.status,
+        error: recipient.error || null,
+        tracking: trackingByRecipient.get(String(recipient._id)) || null
       });
 
       recipientsByCampaign.set(key, existingRecipients);
@@ -161,6 +184,7 @@ exports.getCampaigns = async (req, res) => {
 
 exports.getStats = async (req, res) => {
   try {
+    await syncAllCampaignStatsForUser(req.user._id).catch(() => null);
     await syncUserReplyStats(req.user._id).catch(() => null);
 
     const campaigns = await Campaign.find({ userId: req.user._id });
@@ -208,6 +232,9 @@ exports.getCampaign = async (req, res) => {
     if (!campaign) {
       return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
+
+    await syncCampaignStats(campaign).catch(() => null);
+    await campaign.populate('emailConfigId');
 
     res.json({ success: true, data: campaign });
   } catch (error) {
