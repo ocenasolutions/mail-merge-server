@@ -5,6 +5,7 @@ const EmailConfig = require('../models/EmailConfig');
 const User = require('../models/User');
 const TrackedEmail = require('../models/TrackedEmail');
 const { listMessages, supportsMailbox } = require('../services/mailboxService');
+const { sendEmail } = require('../services/emailService');
 const logger = require('../utils/logger');
 
 const GMAIL_ATTACHMENT_TOTAL_LIMIT_BYTES = 25 * 1024 * 1024;
@@ -506,9 +507,15 @@ exports.getEmail = async (req, res) => {
 
 exports.sendEmail = async (req, res) => {
   try {
-    const { to, subject, content, cc, bcc, isTracked } = req.body;
+    const { to, subject, content, cc, bcc, isTracked, accountId, account } = req.body;
     const userId = req.user._id;
-    const attachments = Array.isArray(req.files) ? req.files : [];
+    const attachments = Array.isArray(req.files) ? req.files.map((file) => ({
+      filename: file.originalname,
+      contentType: file.mimetype || 'application/octet-stream',
+      content: file.buffer,
+      size: file.size || (file.buffer ? file.buffer.length : 0),
+      disposition: 'attachment'
+    })) : [];
 
     const user = await User.findById(userId);
 
@@ -526,87 +533,59 @@ exports.sendEmail = async (req, res) => {
       });
     }
 
-    const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      process.env.GOOGLE_CALLBACK_URL || process.env.GOOGLE_REDIRECT_URI
-    );
+    const selectedAccountId = String(accountId || account?.id || 'gmail');
+    const emailConfig = selectedAccountId === 'gmail'
+      ? {
+          _id: 'gmail',
+          provider: 'gmail',
+          config: { email: user.email }
+        }
+      : await EmailConfig.findOne({
+          _id: selectedAccountId,
+          userId
+        });
 
-    oauth2Client.setCredentials({
-      access_token: user.googleAccessToken,
-      refresh_token: user.googleRefreshToken
-    });
+    if (!emailConfig) {
+      return res.status(404).json({
+        success: false,
+        message: 'Selected email account not found'
+      });
+    }
 
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     const trackingId = isTracked ? crypto.randomUUID() : null;
-    const signatureHtml = user.settings?.signature?.enabled && user.settings?.signature?.html
-      ? user.settings.signature.html
-      : '';
-    const htmlBody = buildTrackedBody(`${content || ''}${signatureHtml}`, trackingId, !!isTracked);
-    const plainTextBody = buildPlainTextBody(htmlBody);
-    const totalAttachmentBytes = attachments.reduce((sum, file) => sum + (file.size || 0), 0);
-
-    const blockedFile = attachments.find((file) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(file.originalname)));
-    if (blockedFile) {
-      return res.status(400).json({
-        success: false,
-        message: `Attachment type not allowed: ${blockedFile.originalname}`
-      });
-    }
-
-    if (totalAttachmentBytes > GMAIL_ATTACHMENT_TOTAL_LIMIT_BYTES) {
-      return res.status(400).json({
-        success: false,
-        message: 'Attachments exceed Gmail\'s 25 MB total size limit.'
-      });
-    }
-
-    const encodedEmail = buildGmailRawMessage({
-      from: user.email,
+    const result = await sendEmail(
+      emailConfig,
+      user,
       to,
-      cc,
-      bcc,
       subject,
-      textBody: plainTextBody,
-      htmlBody,
+      content,
       trackingId,
-      attachments
-    });
-
-    const result = await gmail.users.messages.send({
-      userId: 'me',
-      requestBody: {
-        raw: encodedEmail
-      }
-    });
-
-    let trackedEmail = null;
-    if (trackingId) {
-      trackedEmail = await TrackedEmail.create({
-        userId,
-        trackingId,
-        providerMessageId: result.data.id,
-        provider: 'gmail',
-        accountId: 'gmail',
-        senderEmail: user.email,
-        recipientEmail: to,
+      {
         cc,
         bcc,
-        subject: subject || '(No Subject)',
-        content: String(content || '').substring(0, 1000),
-        trackingEnabled: true
+        attachments,
+        trackingEnabled: !!isTracked
+      }
+    );
+
+    if (!result.success) {
+      return res.status(result.statusCode || 500).json({
+        success: false,
+        message: result.error || 'Failed to send email',
+        providerError: result.providerError
       });
     }
 
-    logger.info({ messageId: result.data.id, trackingId }, 'Email sent successfully via Gmail API');
+    logger.info({ trackingId, accountId: selectedAccountId }, 'Email sent successfully');
 
     res.json({
       success: true,
       message: 'Email sent successfully',
       data: {
-        messageId: result.data.id,
+        messageId: result?.data?.messageId || null,
         trackingId,
-        tracked: !!trackedEmail
+        tracked: !!trackingId,
+        accountId: selectedAccountId
       }
     });
   } catch (error) {
