@@ -287,7 +287,7 @@ const getMessageDetail = async (emailConfig, user, { folder = 'inbox', uid }) =>
         answered: message.flags?.has('\\Answered') || false,
         flagged: message.flags?.has('\\Flagged') || false,
         html: parsed.html || '',
-        text: parsed.textAsHtml || parsed.text || ''
+        text: parsed.text || parsed.textAsHtml || ''
       };
     } finally {
       lock.release();

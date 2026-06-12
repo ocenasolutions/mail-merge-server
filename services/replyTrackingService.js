@@ -42,8 +42,115 @@ const stripHtml = (value = '') => String(value)
   .replace(/\s+/g, ' ')
   .trim();
 
-const cleanReplySnippet = (value = '') => {
-  const normalized = stripHtml(value)
+const stripQuotedHtmlBlocks = (value = '') => String(value)
+  .replace(/<blockquote[\s\S]*?<\/blockquote>/gi, ' ')
+  .replace(/<div[^>]*class="[^"]*(gmail_quote|gmail_extra|protonmail_quote|yahoo_quoted)[^"]*"[^>]*>[\s\S]*?<\/div>/gi, ' ')
+  .replace(/<div[^>]*style="[^"]*margin[^"]*left[^"]*"[^>]*>[\s\S]*?<\/div>/gi, ' ');
+
+const htmlToReplyText = (value = '') => stripHtml(
+  stripQuotedHtmlBlocks(String(value || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<\/tr>/gi, '\n')
+    .replace(/<\/td>/gi, ' '))
+);
+
+const normalizeForMatch = (value = '') => String(value)
+  .replace(/[\u2019’]/g, '\'')
+  .replace(/[^a-zA-Z0-9\s']/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .toLowerCase();
+
+const toPlainComparisonText = (value = '') => {
+  const stringValue = String(value || '');
+  return stringValue.includes('<') ? htmlToReplyText(stringValue) : stripHtml(stringValue);
+};
+
+const takeFirstWords = (value = '', count = 0) => String(value || '')
+  .split(/\s+/)
+  .filter(Boolean)
+  .slice(0, count)
+  .join(' ');
+
+const buildCampaignEchoFragments = (campaign) => {
+  const sources = [
+    campaign?.subject || '',
+    campaign?.body || '',
+    campaign?.htmlBody || '',
+    campaign?.signatureHtml || ''
+  ];
+
+  const fragments = new Set();
+  for (const source of sources) {
+    const plain = toPlainComparisonText(source);
+    if (!plain) {
+      continue;
+    }
+
+    const sentences = plain
+      .split(/[.!?]+\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    for (const sentence of sentences.slice(0, 3)) {
+      const shortSentence = takeFirstWords(sentence, 8);
+      if (shortSentence.length >= 24) {
+        fragments.add(shortSentence);
+      }
+    }
+
+    const leadingWords = takeFirstWords(plain, 12);
+    if (leadingWords.length >= 24) {
+      fragments.add(leadingWords);
+    }
+  }
+
+  return Array.from(fragments)
+    .map((fragment) => normalizeForMatch(fragment))
+    .filter((fragment) => fragment.length >= 20)
+    .sort((left, right) => right.length - left.length);
+};
+
+const trimCampaignEcho = (snippet = '', campaign) => {
+  const fragments = buildCampaignEchoFragments(campaign);
+  if (!fragments.length) {
+    return snippet;
+  }
+
+  const normalizedSnippet = normalizeForMatch(snippet);
+  if (!normalizedSnippet) {
+    return snippet;
+  }
+
+  let bestCutIndex = -1;
+  for (const fragment of fragments) {
+    const index = normalizedSnippet.indexOf(fragment);
+    if (index <= 0) {
+      continue;
+    }
+
+    if (bestCutIndex === -1 || index < bestCutIndex) {
+      bestCutIndex = index;
+    }
+  }
+
+  if (bestCutIndex <= 0) {
+    return snippet;
+  }
+
+  const originalWords = String(snippet).trim().split(/\s+/).filter(Boolean);
+  const matchedWords = normalizedSnippet.slice(0, bestCutIndex).trim().split(/\s+/).filter(Boolean).length;
+  const trimmed = originalWords.slice(0, matchedWords).join(' ').trim();
+  return trimmed || snippet;
+};
+
+const cleanReplySnippet = (value = '', campaign = null) => {
+  const normalized = String(value || '').includes('<')
+    ? htmlToReplyText(value)
+    : stripHtml(value)
     .replace(/&#x202f;|&#8239;|&nbsp;/gi, ' ')
     .replace(/\s*On .*?wrote:\s*/i, ' ')
     .replace(/\s*>+\s*/g, ' ')
@@ -65,6 +172,14 @@ const cleanReplySnippet = (value = '') => {
   for (const marker of cutMarkers) {
     snippet = snippet.split(marker)[0].trim();
   }
+
+  snippet = trimCampaignEcho(snippet, campaign);
+
+  snippet = snippet
+    .replace(/\s+(best regards|kind regards|regards|sincerely|thanks|thank you)[,\s\S]*$/i, '')
+    .replace(/\s+(from|sent|subject):\s.*$/i, '')
+    .replace(/\s+-----original message-----[\s\S]*$/i, '')
+    .trim();
 
   return snippet || normalized;
 };
@@ -279,15 +394,15 @@ const syncUserReplyStats = async (userId) => {
     let leadScore = recipient.leadScore || 0;
     let leadReason = recipient.leadReason || '';
 
-    if (latestMatch && (nextReplyCount !== existingReplyCount || !recipient.latestReplySnippet)) {
+    if (latestMatch) {
       try {
         const detail = await getMessageDetail(latestMatch.mailboxConfig, user, {
           folder: 'inbox',
           uid: latestMatch.uid
         });
-        const rawReplyText = stripHtml(detail?.text || detail?.html || latestMatch.subject || '');
-        latestReplySnippet = cleanReplySnippet(detail?.text || detail?.html || rawReplyText).slice(0, 280);
-        const classification = scoreReplyText(rawReplyText);
+        const rawReplyText = detail?.html || detail?.text || latestMatch.subject || '';
+        latestReplySnippet = cleanReplySnippet(rawReplyText, campaign).slice(0, 280);
+        const classification = scoreReplyText(latestReplySnippet || rawReplyText);
         leadStatus = classification.status;
         leadScore = classification.score;
         leadReason = classification.reason;
