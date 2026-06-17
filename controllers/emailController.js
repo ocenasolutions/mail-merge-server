@@ -15,29 +15,41 @@ const getAttachmentExtension = (filename = '') => filename.split('.').pop()?.toL
 
 const chunkBase64 = (value) => value.match(/.{1,76}/g)?.join('\r\n') || '';
 
-const buildPlainTextBody = (html = '') => String(html)
-  .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-  .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-  .replace(/<\s*br\s*\/?>/gi, '\n')
-  .replace(/<\/p>/gi, '\n')
-  .replace(/<\/div>/gi, '\n')
-  .replace(/<\/li>/gi, '\n')
-  .replace(/<\/tr>/gi, '\n')
-  .replace(/<\/h[1-6]>/gi, '\n')
-  .replace(/<li\b[^>]*>/gi, '- ')
-  .replace(/<[^>]+>/g, ' ')
-  .replace(/&nbsp;/gi, ' ')
-  .replace(/&amp;/gi, '&')
-  .replace(/&lt;/gi, '<')
-  .replace(/&gt;/gi, '>')
-  .replace(/&quot;/gi, '"')
-  .replace(/&#39;/gi, "'")
-  .replace(/\r/g, '')
-  .replace(/[ \t]+\n/g, '\n')
-  .replace(/\n[ \t]+/g, '\n')
-  .replace(/\n{3,}/g, '\n\n')
-  .replace(/[ \t]{2,}/g, ' ')
-  .trim();
+const buildPlainTextBody = (html = '') => {
+  const processedHtml = String(html)
+    .replace(/<a\b[^>]*?href="([^"]+)"[^>]*?>([\s\S]*?)<\/a>/gi, (match, href, text) => {
+      const trimmedText = text.replace(/<[^>]+>/g, '').trim();
+      const trimmedHref = href.trim();
+      if (trimmedText && trimmedHref) {
+        return `${trimmedText} (${trimmedHref})`;
+      }
+      return trimmedText || trimmedHref || '';
+    });
+
+  return processedHtml
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<\/tr>/gi, '\n')
+    .replace(/<\/h[1-6]>/gi, '\n')
+    .replace(/<li\b[^>]*>/gi, '- ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+};
 
 const appendMimePartHeader = (lines, boundary, headers, body) => {
   lines.push(`--${boundary}`);
