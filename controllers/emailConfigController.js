@@ -2,6 +2,7 @@ const EmailConfig = require('../models/EmailConfig');
 const { testEmailConnection } = require('../services/emailService');
 const { listMailboxes, listMessages, getMessageDetail, supportsMailbox } = require('../services/mailboxService');
 const { appendEmailDebugLog } = require('../utils/emailDebugLogger');
+const logger = require('../utils/logger');
 
 exports.getConfigs = async (req, res) => {
   try {
@@ -291,12 +292,12 @@ exports.testConfig = async (req, res) => {
       </html>
     `;
 
-    console.log('🧪 Sending test email:', {
+    logger.info({
       provider: config.provider,
       from: config.config.email || userWithTokens.email,
       to: testEmail,
       trackingId
-    });
+    }, 'Sending test email for email config');
     appendEmailDebugLog('email_config_test_requested', {
       configId: String(config._id),
       provider: config.provider,
@@ -315,7 +316,7 @@ exports.testConfig = async (req, res) => {
     );
 
     if (result.success) {
-      console.log('✅ Test email sent successfully');
+      logger.info({ provider: config.provider, trackingId }, 'Test email sent successfully');
       config.verified = true;
       await config.save();
       
@@ -325,7 +326,7 @@ exports.testConfig = async (req, res) => {
         trackingId
       });
     } else {
-      console.log('❌ Test email failed:', result.error);
+      logger.warn({ provider: config.provider, trackingId, error: result.error }, 'Test email failed');
       appendEmailDebugLog('email_config_test_failed', {
         configId: String(config._id),
         provider: config.provider,
@@ -345,7 +346,7 @@ exports.testConfig = async (req, res) => {
       });
     }
   } catch (error) {
-    console.error('❌ Test email error:', error);
+    logger.error({ err: error }, 'Test email error');
     res.status(500).json({ success: false, message: error.message });
   }
 };

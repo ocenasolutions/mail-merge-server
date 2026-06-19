@@ -1,0 +1,42 @@
+const CAMPAIGN_STATUSES = {
+  DRAFT: 'draft',
+  SCHEDULED: 'scheduled',
+  QUEUED: 'queued',
+  SENDING: 'sending',
+  COMPLETED: 'completed',
+  PAUSED: 'paused',
+  FAILED: 'failed'
+};
+
+const JOB_STATUSES = {
+  PENDING: 'pending',
+  PROCESSING: 'processing',
+  RETRYING: 'retrying',
+  SENT: 'sent',
+  FAILED: 'failed',
+  PAUSED: 'paused'
+};
+
+const DEFAULT_BATCH_SIZE = 25;
+const DEFAULT_WORKER_COUNT = 4;
+const MIN_WORKERS = 3;
+const MAX_WORKERS = 5;
+const DEFAULT_LEASE_MS = 2 * 60 * 1000;
+const DEFAULT_MAX_ATTEMPTS = 8;
+const DEFAULT_POLL_INTERVAL_MS = 3000;
+const DEFAULT_BACKOFF_BASE_MS = 1500;
+const DEFAULT_BACKOFF_MAX_MS = 15 * 60 * 1000;
+
+module.exports = {
+  CAMPAIGN_STATUSES,
+  JOB_STATUSES,
+  DEFAULT_BATCH_SIZE,
+  DEFAULT_WORKER_COUNT,
+  MIN_WORKERS,
+  MAX_WORKERS,
+  DEFAULT_LEASE_MS,
+  DEFAULT_MAX_ATTEMPTS,
+  DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_BACKOFF_BASE_MS,
+  DEFAULT_BACKOFF_MAX_MS
+};

@@ -22,7 +22,6 @@ cd server
 ```bash
 npm install
 ```
-
 This will install all required packages including:
 - Express.js
 - Mongoose

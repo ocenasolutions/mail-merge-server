@@ -8,6 +8,8 @@ const { syncCampaignStats, syncAllCampaignStatsForUser } = require('../services/
 const crypto = require('crypto');
 const axios = require('axios');
 const { syncUserReplyStats } = require('../services/replyTrackingService');
+const campaignPipeline = require('../services/campaignPipeline/campaignPipelineService');
+const logger = require('../utils/logger');
 
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set(['ade', 'adp', 'apk', 'appx', 'bat', 'cab', 'chm', 'cmd', 'com', 'cpl', 'diagcab', 'dll', 'dmg', 'exe', 'hta', 'ins', 'isp', 'iso', 'jar', 'js', 'jse', 'lib', 'lnk', 'mde', 'msc', 'msi', 'msp', 'mst', 'nsh', 'pif', 'ps1', 'reg', 'scr', 'sct', 'sh', 'sys', 'vb', 'vbe', 'vbs', 'vxd', 'wsc', 'wsf', 'wsh']);
 const PROVIDER_ATTACHMENT_LIMITS = {
@@ -318,7 +320,7 @@ exports.createCampaign = async (req, res) => {
 
     res.status(201).json({ success: true, data: campaign });
   } catch (error) {
-    console.error('Create campaign error:', error);
+    logger.error({ err: error }, 'Create campaign error');
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -360,6 +362,7 @@ exports.deleteCampaign = async (req, res) => {
 
     // Delete associated recipients
     await Recipient.deleteMany({ campaignId: campaign._id });
+    await require('../models/CampaignDispatchJob').deleteMany({ campaignId: campaign._id });
 
     res.json({ success: true, message: 'Campaign deleted' });
   } catch (error) {
@@ -413,94 +416,62 @@ exports.previewCampaign = async (req, res) => {
 
 exports.sendCampaign = async (req, res) => {
   try {
-    console.log('📧 Send campaign request received for campaign:', req.params.id);
-    
     const campaign = await Campaign.findOne({
       _id: req.params.id,
       userId: req.user._id
     }).populate('emailConfigId');
 
     if (!campaign) {
-      console.log('❌ Campaign not found:', req.params.id);
       return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
 
-    console.log('✅ Campaign found:', {
-      id: campaign._id,
-      name: campaign.name,
-      status: campaign.status,
-      hasEmailConfig: !!campaign.emailConfigId
-    });
-
-    if (campaign.status === 'sending') {
-      console.log('⚠️ Campaign already sending');
-      return res.status(400).json({ success: false, message: 'Campaign already sending' });
-    }
-
-    if (!campaign.emailConfigId) {
-      const resolvedEmailConfig = await resolveCampaignEmailConfig(req.user._id);
-
-      if (!resolvedEmailConfig) {
-        console.log('❌ Email configuration not found for campaign');
-        return res.status(400).json({ success: false, message: 'Email configuration not found for this campaign' });
-      }
-
-      campaign.emailConfigId = resolvedEmailConfig._id;
-      await campaign.save();
-      await campaign.populate('emailConfigId');
-    }
-
-    let pendingRecipients = await Recipient.find({
-      campaignId: campaign._id,
-      status: 'pending'
-    });
-
-    if (pendingRecipients.length === 0) {
+    const recipientCount = await Recipient.countDocuments({ campaignId: campaign._id });
+    if (recipientCount === 0) {
       return res.status(400).json({
         success: false,
         message: 'No recipients found for this campaign'
       });
     }
 
-    campaign.stats.total = await Recipient.countDocuments({ campaignId: campaign._id });
-    campaign.status = req.body.scheduledAt ? 'scheduled' : 'sending';
-    campaign.scheduledAt = req.body.scheduledAt;
-    campaign.startedAt = req.body.scheduledAt ? null : new Date();
-    await campaign.save();
-
-    console.log('✅ Campaign updated:', {
-      status: campaign.status,
-      totalRecipients: campaign.stats.total,
-      scheduled: !!req.body.scheduledAt
-    });
-
-    // Start sending if not scheduled
-    if (!req.body.scheduledAt) {
-      console.log('🚀 Starting email sending process...');
-      require('../services/emailSenderService').processCampaign(campaign._id);
+    if (campaign.status === 'sending') {
+      return res.status(400).json({ success: false, message: 'Campaign already sending' });
     }
 
-    res.json({ success: true, data: campaign });
+    if (req.body.scheduledAt) {
+      const scheduledAt = new Date(req.body.scheduledAt);
+      await Campaign.updateOne(
+        { _id: campaign._id },
+        {
+          $set: {
+            status: 'scheduled',
+            scheduledAt,
+            startedAt: null,
+            completedAt: null,
+            'queue.throttledUntil': null
+          }
+        }
+      );
+      const updatedCampaign = await Campaign.findById(campaign._id).populate('emailConfigId');
+      return res.json({ success: true, data: updatedCampaign });
+    }
+
+    const startedCampaign = await campaignPipeline.startCampaign(campaign._id, { reset: false });
+    res.json({ success: true, data: startedCampaign });
   } catch (error) {
-    console.error('❌ Send campaign error:', error);
-    console.error('Error stack:', error.stack);
     res.status(500).json({ success: false, message: error.message || 'Failed to send campaign' });
   }
 };
 
 exports.pauseCampaign = async (req, res) => {
   try {
-    const campaign = await Campaign.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user._id },
-      { status: 'paused' },
-      { new: true }
-    );
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
 
     if (!campaign) {
       return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
 
-    res.json({ success: true, data: campaign });
+    const updatedCampaign = await campaignPipeline.pauseCampaign(campaign._id);
+    res.json({ success: true, data: updatedCampaign });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -508,21 +479,29 @@ exports.pauseCampaign = async (req, res) => {
 
 exports.resumeCampaign = async (req, res) => {
   try {
-    const campaign = await Campaign.findOne({
-      _id: req.params.id,
-      userId: req.user._id
-    });
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
 
     if (!campaign) {
       return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
 
-    campaign.status = 'sending';
-    await campaign.save();
+    const updatedCampaign = await campaignPipeline.resumeCampaign(campaign._id);
+    res.json({ success: true, data: updatedCampaign });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
 
-    require('../services/emailSenderService').processCampaign(campaign._id);
+exports.restartCampaign = async (req, res) => {
+  try {
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
 
-    res.json({ success: true, data: campaign });
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
+    }
+
+    const updatedCampaign = await campaignPipeline.restartCampaign(campaign._id);
+    res.json({ success: true, data: updatedCampaign });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -625,12 +604,12 @@ exports.testEmail = async (req, res) => {
       </html>
     `;
 
-    console.log('🧪 Sending test email:', {
+    logger.info({
       provider: emailConfig.provider,
       from: emailConfig.config.email || user.email,
       to: testEmail,
       trackingId
-    });
+    }, 'Sending campaign test email');
 
     const result = await sendEmail(
       emailConfig,
@@ -642,21 +621,21 @@ exports.testEmail = async (req, res) => {
     );
 
     if (result.success) {
-      console.log('✅ Test email sent successfully');
+      logger.info({ provider: emailConfig.provider, trackingId }, 'Test email sent successfully');
       res.json({ 
         success: true, 
         message: 'Test email sent successfully',
         trackingId
       });
     } else {
-      console.log('❌ Test email failed:', result.error);
+      logger.warn({ provider: emailConfig.provider, trackingId, error: result.error }, 'Test email failed');
       res.status(500).json({ 
         success: false, 
         message: `Failed to send test email: ${result.error}` 
       });
     }
   } catch (error) {
-    console.error('❌ Test email error:', error);
+    logger.error({ err: error }, 'Test email error');
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -795,48 +774,26 @@ exports.generateAiDraft = async (req, res) => {
 
 exports.retryFailed = async (req, res) => {
   try {
-    console.log('🔄 Retry failed recipients request for campaign:', req.params.id);
-    
     const campaign = await Campaign.findOne({
       _id: req.params.id,
       userId: req.user._id
     }).populate('emailConfigId');
 
     if (!campaign) {
-      console.log('❌ Campaign not found:', req.params.id);
       return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
 
-    console.log('✅ Campaign found:', {
-      id: campaign._id,
-      name: campaign.name,
-      status: campaign.status
-    });
-
-    // Check if campaign is in a state that allows retry
     if (campaign.status === 'sending') {
-      console.log('⚠️ Campaign is currently sending');
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Cannot retry while campaign is sending. Please pause it first.' 
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot retry while campaign is sending. Pause it first.'
       });
     }
 
-    if (!campaign.emailConfigId) {
-      console.log('❌ Email configuration not found for campaign');
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email configuration not found for this campaign' 
-      });
-    }
-
-    // Find all failed recipients
     const failedRecipients = await Recipient.find({
       campaignId: campaign._id,
       status: 'failed'
     });
-
-    console.log('📋 Failed recipients found:', failedRecipients.length);
 
     if (failedRecipients.length === 0) {
       return res.status(400).json({ 
@@ -845,44 +802,17 @@ exports.retryFailed = async (req, res) => {
       });
     }
 
-    // Reset failed recipients to pending
-    await Recipient.updateMany(
-      {
-        campaignId: campaign._id,
-        status: 'failed'
-      },
-      {
-        $set: { 
-          status: 'pending',
-          error: null,
-          sentAt: null
-        }
-      }
-    );
+    const updatedCampaign = await campaignPipeline.retryRecipients(campaign._id);
 
-    // Update campaign stats
-    campaign.stats.failed = 0;
-    campaign.status = 'sending';
-    campaign.startedAt = new Date();
-    await campaign.save();
-
-    console.log('✅ Failed recipients reset to pending:', failedRecipients.length);
-    console.log('🚀 Starting retry process...');
-
-    // Start sending
-    require('../services/emailSenderService').processCampaign(campaign._id);
-
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: `Retrying ${failedRecipients.length} failed recipients`,
       data: {
         retriedCount: failedRecipients.length,
-        campaign
+        campaign: updatedCampaign
       }
     });
   } catch (error) {
-    console.error('❌ Retry failed error:', error);
-    console.error('Error stack:', error.stack);
     res.status(500).json({ 
       success: false, 
       message: error.message || 'Failed to retry campaign' 
@@ -893,7 +823,6 @@ exports.retryFailed = async (req, res) => {
 exports.retrySelected = async (req, res) => {
   try {
     const { recipientIds } = req.body;
-    console.log('🔄 Retry selected recipients request:', recipientIds?.length);
 
     if (!recipientIds || !Array.isArray(recipientIds) || recipientIds.length === 0) {
       return res.status(400).json({ 
@@ -912,51 +841,23 @@ exports.retrySelected = async (req, res) => {
     }
 
     if (campaign.status === 'sending') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Cannot retry while campaign is sending. Please pause it first.' 
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot retry while campaign is sending. Pause it first.'
       });
     }
 
-    // Reset selected recipients to pending
-    const result = await Recipient.updateMany(
-      {
-        _id: { $in: recipientIds },
-        campaignId: campaign._id,
-        status: 'failed'
-      },
-      {
-        $set: { 
-          status: 'pending',
-          error: null,
-          sentAt: null
-        }
-      }
-    );
+    const updatedCampaign = await campaignPipeline.retryRecipients(campaign._id, recipientIds);
 
-    console.log('✅ Selected recipients reset to pending:', result.modifiedCount);
-
-    // Update campaign stats
-    const failedCount = await Recipient.countDocuments({
-      campaignId: campaign._id,
-      status: 'failed'
-    });
-    campaign.stats.failed = failedCount;
-    campaign.status = 'sending';
-    await campaign.save();
-
-    // Start sending
-    require('../services/emailSenderService').processCampaign(campaign._id);
-
-    res.json({ 
-      success: true, 
-      message: `Retrying ${result.modifiedCount} selected recipients`,
+    res.json({
+      success: true,
+      message: `Retrying selected recipients`,
       data: {
-        retriedCount: result.modifiedCount
+        retriedCount: recipientIds.length,
+        campaign: updatedCampaign
       }
     });
   } catch (error) {
-    console.error('❌ Retry selected error:', error);
     res.status(500).json({ 
       success: false, 
       message: error.message || 'Failed to retry selected recipients' 
@@ -967,7 +868,6 @@ exports.retrySelected = async (req, res) => {
 exports.retryOne = async (req, res) => {
   try {
     const { recipientId } = req.body;
-    console.log('🔄 Retry one recipient request:', recipientId);
 
     if (!recipientId) {
       return res.status(400).json({ 
@@ -986,57 +886,78 @@ exports.retryOne = async (req, res) => {
     }
 
     if (campaign.status === 'sending') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Cannot retry while campaign is sending. Please pause it first.' 
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot retry while campaign is sending. Pause it first.'
       });
     }
 
-    // Find and reset the recipient
     const recipient = await Recipient.findOne({
       _id: recipientId,
-      campaignId: campaign._id,
-      status: 'failed'
+      campaignId: campaign._id
     });
 
     if (!recipient) {
       return res.status(404).json({ 
         success: false, 
-        message: 'Failed recipient not found' 
+        message: 'Recipient not found' 
       });
     }
 
-    recipient.status = 'pending';
-    recipient.error = null;
-    recipient.sentAt = null;
-    await recipient.save();
+    if (recipient.status === 'sent') {
+      return res.status(400).json({
+        success: false,
+        message: 'Sent recipients cannot be retried'
+      });
+    }
 
-    console.log('✅ Recipient reset to pending:', recipient.email);
+    const updatedCampaign = await campaignPipeline.retryRecipients(campaign._id, [recipient._id]);
 
-    // Update campaign stats
-    const failedCount = await Recipient.countDocuments({
-      campaignId: campaign._id,
-      status: 'failed'
-    });
-    campaign.stats.failed = failedCount;
-    campaign.status = 'sending';
-    await campaign.save();
-
-    // Start sending
-    require('../services/emailSenderService').processCampaign(campaign._id);
-
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: `Retrying ${recipient.email}`,
       data: {
-        recipient
+        recipient,
+        campaign: updatedCampaign
       }
     });
   } catch (error) {
-    console.error('❌ Retry one error:', error);
     res.status(500).json({ 
       success: false, 
       message: error.message || 'Failed to retry recipient' 
     });
+  }
+};
+
+exports.getDeadLetters = async (req, res) => {
+  try {
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
+    }
+
+    const deadLetters = await campaignPipeline.listDeadLettersForCampaign(campaign._id);
+    res.json({ success: true, data: deadLetters });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.requeueDeadLetter = async (req, res) => {
+  try {
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
+    }
+
+    const { deadLetterId } = req.params;
+    const deadLetter = await campaignPipeline.requeueDeadLetter(deadLetterId, {
+      requeuedBy: req.user._id,
+      requeuedAt: new Date().toISOString()
+    });
+
+    res.json({ success: true, data: deadLetter });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };

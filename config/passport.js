@@ -1,5 +1,6 @@
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const User = require('../models/User');
+const logger = require('../utils/logger');
 
 module.exports = (passport) => {
   const hasGoogleOAuthConfig = Boolean(
@@ -20,8 +21,11 @@ module.exports = (passport) => {
         },
         async (accessToken, refreshToken, profile, done) => {
           try {
-            console.log('OAuth callback - Access token:', accessToken ? 'Present' : 'Missing');
-            console.log('OAuth callback - Refresh token:', refreshToken ? 'Present' : 'Missing');
+            logger.info({
+              hasAccessToken: Boolean(accessToken),
+              hasRefreshToken: Boolean(refreshToken),
+              googleId: profile?.id
+            }, 'OAuth callback received');
 
             let user = await User.findOne({ googleId: profile.id });
 
@@ -30,9 +34,8 @@ module.exports = (passport) => {
               user.googleAccessToken = accessToken;
               if (refreshToken) {
                 user.googleRefreshToken = refreshToken;
-                console.log('Updated refresh token for existing user');
               } else {
-                console.log('No refresh token provided, keeping existing one');
+                logger.info({ googleId: profile?.id }, 'No refresh token provided, keeping existing one');
               }
               await user.save();
               return done(null, user);
@@ -48,17 +51,20 @@ module.exports = (passport) => {
               googleRefreshToken: refreshToken
             });
 
-            console.log('Created new user with refresh token:', refreshToken ? 'Yes' : 'No');
+            logger.info({
+              googleId: profile?.id,
+              hasRefreshToken: Boolean(refreshToken)
+            }, 'Created new OAuth user');
             done(null, user);
           } catch (error) {
-            console.error('OAuth error:', error);
+            logger.error({ err: error, googleId: profile?.id }, 'OAuth error');
             done(error, null);
           }
         }
       )
     );
   } else {
-    console.warn('Google OAuth is disabled: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_CALLBACK_URL not fully configured.');
+    logger.warn('Google OAuth is disabled: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_CALLBACK_URL not fully configured.');
   }
 
   passport.serializeUser((user, done) => {

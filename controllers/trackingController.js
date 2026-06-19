@@ -266,7 +266,7 @@ exports.sendgridWebhook = async (req, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('SendGrid webhook error:', error);
+    logger.error({ err: error }, 'SendGrid webhook error');
     res.status(500).json({ success: false });
   }
 };
@@ -291,7 +291,7 @@ exports.mailgunWebhook = async (req, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Mailgun webhook error:', error);
+    logger.error({ err: error }, 'Mailgun webhook error');
     res.status(500).json({ success: false });
   }
 };

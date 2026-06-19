@@ -1,49 +1,65 @@
 const cron = require('node-cron');
-const Campaign = require('../models/Campaign');
 const User = require('../models/User');
-const { processCampaign } = require('./emailSenderService');
+const Campaign = require('../models/Campaign');
+const logger = require('../utils/logger');
 const { syncUserReplyStats } = require('./replyTrackingService');
 const { syncAllCampaignStatsForUser } = require('./campaignStatsService');
+const campaignPipeline = require('./campaignPipeline/campaignPipelineService');
 
-// Check for scheduled campaigns every minute
-cron.schedule('* * * * *', async () => {
-  try {
-    const now = new Date();
-    
-    const campaigns = await Campaign.find({
-      status: 'scheduled',
-      scheduledAt: { $lte: now }
-    });
+const startedTasks = [];
 
-    for (const campaign of campaigns) {
-      campaign.status = 'sending';
-      campaign.startedAt = new Date();
-      await campaign.save();
+campaignPipeline.start();
 
-      processCampaign(campaign._id);
+// Check for scheduled campaigns every minute.
+startedTasks.push(
+  cron.schedule('* * * * *', async () => {
+    try {
+      const now = new Date();
+      const dueCampaigns = await Campaign.find({
+        status: 'scheduled',
+        scheduledAt: { $lte: now }
+      }).select('_id');
+
+      for (const campaign of dueCampaigns) {
+        await campaignPipeline.startCampaign(campaign._id, {
+          scheduledAt: campaign.scheduledAt,
+          initiatedByScheduler: true
+        });
+      }
+    } catch (error) {
+      logger.error({ err: error }, 'Scheduler error while activating campaigns');
     }
-  } catch (error) {
-    console.error('Scheduler error:', error);
-  }
-});
+  })
+);
 
-// Sync replies and campaign stats for all active users every 15 minutes
-cron.schedule('*/15 * * * *', async () => {
-  try {
-    console.log('⏳ Running scheduled background campaign stats & replies sync...');
-    const users = await User.find({});
-    for (const user of users) {
-      await syncUserReplyStats(user._id).catch(err => 
-        console.error(`Error syncing replies for user ${user._id}:`, err.message)
-      );
-      await syncAllCampaignStatsForUser(user._id).catch(err => 
-        console.error(`Error syncing campaign stats for user ${user._id}:`, err.message)
-      );
+// Sync replies and campaign stats for all active users every 15 minutes.
+startedTasks.push(
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      logger.info('Running scheduled background campaign stats & replies sync');
+      const users = await User.find({});
+      for (const user of users) {
+        await syncUserReplyStats(user._id).catch((err) => logger.warn({
+          err,
+          userId: user._id
+        }, 'Error syncing replies'));
+
+        await syncAllCampaignStatsForUser(user._id).catch((err) => logger.warn({
+          err,
+          userId: user._id
+        }, 'Error syncing campaign stats'));
+      }
+      logger.info('Background stats & replies sync completed');
+    } catch (error) {
+      logger.error({ err: error }, 'Background stats sync scheduler error');
     }
-    console.log('✅ Background stats & replies sync completed.');
-  } catch (error) {
-    console.error('Background stats sync scheduler error:', error);
-  }
-});
+  })
+);
 
-console.log('Scheduler service started');
+logger.info({ taskCount: startedTasks.length }, 'Scheduler service started');
+
+module.exports = {
+  stopAll: () => {
+    startedTasks.forEach((task) => task.stop());
+  }
+};

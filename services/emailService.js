@@ -6,6 +6,7 @@ const { appendSentMessage, supportsMailbox } = require('./mailboxService');
 const { appendEmailDebugLog, redactApiKey } = require('../utils/emailDebugLogger');
 const SignatureAsset = require('../models/SignatureAsset');
 const TrackedEmail = require('../models/TrackedEmail');
+const providerRegistry = require('./providers');
 
 const BLOCKED_ATTACHMENT_EXTENSIONS = new Set(['ade', 'adp', 'apk', 'appx', 'bat', 'cab', 'chm', 'cmd', 'com', 'cpl', 'diagcab', 'dll', 'dmg', 'exe', 'hta', 'ins', 'isp', 'iso', 'jar', 'js', 'jse', 'lib', 'lnk', 'mde', 'msc', 'msi', 'msp', 'mst', 'nsh', 'pif', 'ps1', 'reg', 'scr', 'sct', 'sh', 'sys', 'vb', 'vbe', 'vbs', 'vxd', 'wsc', 'wsf', 'wsh']);
 const PROVIDER_ATTACHMENT_LIMITS = {
@@ -535,278 +536,20 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
       userEmail: user.email
     }, '📧 Sending email payload');
 
-    switch (emailConfig.provider) {
-      case 'gmail':
-        logger.info({ recipient }, '📤 Sending via Gmail API');
-        
-        // Check if we have refresh token
-        if (!user.googleRefreshToken) {
-          throw new Error('Google authentication expired. Please log out and log in again to reconnect Gmail.');
-        }
+    const sendResult = await providerRegistry.send({
+      emailConfig,
+      user,
+      recipient,
+      subject,
+      htmlBody: bodyWithTracking,
+      textBody: plainTextBody,
+      trackingId: activeTrackingId,
+      cc: options.cc,
+      bcc: options.bcc,
+      attachments: emailAttachments
+    });
 
-        const oauth2Client = new google.auth.OAuth2(
-          process.env.GOOGLE_CLIENT_ID,
-          process.env.GOOGLE_CLIENT_SECRET,
-          process.env.GOOGLE_CALLBACK_URL
-        );
-
-        oauth2Client.setCredentials({
-          access_token: user.googleAccessToken,
-          refresh_token: user.googleRefreshToken
-        });
-
-        // Refresh token if needed
-        try {
-          const { credentials } = await oauth2Client.refreshAccessToken();
-          if (credentials.access_token && credentials.access_token !== user.googleAccessToken) {
-            const User = require('../models/User');
-            await User.findByIdAndUpdate(user._id, { googleAccessToken: credentials.access_token });
-            logger.info({ userId: user._id }, '🔄 Updated user access token');
-          }
-        } catch (error) {
-          logger.error({ err: error }, '❌ Failed to refresh token');
-        }
-
-        // Create Gmail API client
-        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-
-        // Create email message
-        const fromEmail = emailConfig.config.email || user.email;
-        const encodedEmail = buildGmailRawMessage({
-          from: fromEmail,
-          to: recipient,
-          subject,
-          textBody: plainTextBody,
-          htmlBody: bodyWithTracking,
-          trackingId: activeTrackingId,
-          cc: options.cc,
-          bcc: options.bcc,
-          attachments: emailAttachments
-        });
-
-        // Send via Gmail API
-        await gmail.users.messages.send({
-          userId: 'me',
-          requestBody: {
-            raw: encodedEmail
-          }
-        });
-
-        logger.info({ recipient }, '✅ Email sent successfully via Gmail API');
-        break;
-
-      case 'godaddy':
-      case 'hostinger':
-      case 'smtp':
-      case 'titan':
-      case 'outlook':
-        logger.info({ 
-          provider: emailConfig.provider,
-          recipient,
-          host: emailConfig.config?.host,
-          port: emailConfig.config?.port
-        }, '🔧 Creating transporter');
-
-        const transporter = await createTransporter(emailConfig, user);
-        
-        logger.info({ recipient }, '📤 Sending via transporter');
-
-        const mailOptions = {
-          from: emailConfig.config.email || user.email,
-          to: recipient,
-          subject,
-          text: plainTextBody,
-          html: bodyWithTracking,
-          attachments: emailAttachments.map((attachment) => ({
-            filename: attachment.filename,
-            content: attachment.content,
-            contentType: attachment.contentType,
-            cid: attachment.cid,
-            contentDisposition: attachment.disposition
-          }))
-        };
-
-        if (activeTrackingId) {
-          mailOptions.headers = {
-            'X-Entity-Ref-ID': activeTrackingId,
-            'List-Unsubscribe': `<${process.env.APP_URL}/unsubscribe/${activeTrackingId}>`,
-          };
-        }
-
-        logger.info({ 
-          from: mailOptions.from,
-          to: mailOptions.to,
-          subject: mailOptions.subject
-        }, '📧 Mail options prepared');
-
-        await transporter.sendMail(mailOptions);
-
-        try {
-          await appendSentMessage(emailConfig, user, {
-            to: recipient,
-            subject,
-            html: bodyWithTracking,
-            from: mailOptions.from,
-            date: new Date()
-          });
-        } catch (appendError) {
-          logger.warn({ err: appendError, provider: emailConfig.provider, recipient }, 'Could not append sent message to IMAP Sent folder');
-        }
-        
-        logger.info({ recipient }, '✅ Email sent successfully via transporter');
-        break;
-
-      case 'sendgrid':
-        logger.info({ recipient }, '📤 Sending via SendGrid');
-        await axios.post(
-          'https://api.sendgrid.com/v3/mail/send',
-          {
-            personalizations: [{ to: [{ email: recipient }] }],
-            from: { email: emailConfig.config.email },
-            subject,
-            content: [
-              { type: 'text/plain', value: plainTextBody },
-              { type: 'text/html', value: bodyWithTracking }
-            ],
-            attachments: emailAttachments.map((attachment) => ({
-              content: attachment.content.toString('base64'),
-              filename: attachment.filename,
-              type: attachment.contentType,
-              disposition: attachment.disposition || 'attachment',
-              content_id: attachment.cid
-            }))
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${emailConfig.config.apiKey}`,
-              'Content-Type': 'application/json'
-            }
-          }
-        );
-        logger.info({ recipient }, '✅ Email sent successfully via SendGrid');
-        break;
-
-      case 'mailgun':
-        logger.info({ recipient }, '📤 Sending via Mailgun');
-        const formData = new URLSearchParams();
-        formData.append('from', emailConfig.config.email);
-        formData.append('to', recipient);
-        formData.append('subject', subject);
-        formData.append('text', plainTextBody);
-        formData.append('html', bodyWithTracking);
-        emailAttachments.forEach((attachment) => {
-          formData.append('attachment', `data:${attachment.contentType};base64,${attachment.content.toString('base64')}`);
-        });
-
-        await axios.post(
-          `https://api.mailgun.net/v3/${emailConfig.config.domain}/messages`,
-          formData,
-          {
-            auth: {
-              username: 'api',
-              password: emailConfig.config.apiKey
-            }
-          }
-        );
-        logger.info({ recipient }, '✅ Email sent successfully via Mailgun');
-        break;
-
-      case 'brevo':
-        logger.info({ recipient }, '📤 Sending via Brevo');
-        const fromName = emailConfig.config.fromName || emailConfig.config.email.split('@')[0];
-        const brevoPayload = {
-          sender: {
-            email: emailConfig.config.email,
-            name: fromName
-          },
-          to: [{ email: recipient }],
-          subject,
-          textContent: plainTextBody,
-          htmlContent: bodyWithTracking
-        };
-
-        if (emailAttachments.length > 0) {
-          brevoPayload.attachment = emailAttachments.map((attachment) => ({
-            name: attachment.filename,
-            content: attachment.content.toString('base64'),
-            contentId: attachment.cid
-          }));
-        }
-
-        if (!emailConfig.config.apiKey) {
-          throw new Error('Brevo API key is missing');
-        }
-
-        if (!isValidEmail(brevoPayload.sender.email)) {
-          throw new Error(`Brevo sender email is invalid or missing: ${brevoPayload.sender.email || 'empty'}`);
-        }
-
-        if (!isValidEmail(recipient)) {
-          throw new Error(`Recipient email is invalid or missing: ${recipient || 'empty'}`);
-        }
-
-        if (!subject || !String(subject).trim()) {
-          throw new Error('Brevo subject is missing');
-        }
-
-        if (!bodyWithTracking || !String(bodyWithTracking).trim()) {
-          throw new Error('Brevo htmlContent is missing');
-        }
-
-        logger.info({
-          provider: 'brevo',
-          senderEmail: brevoPayload.sender.email,
-          senderName: brevoPayload.sender.name,
-          recipient,
-          subjectLength: String(subject).length,
-          htmlContentLength: String(bodyWithTracking).length,
-          attachmentCount: emailAttachments.length,
-          inlineAttachmentCount: emailAttachments.filter((attachment) => attachment.cid).length,
-          attachmentBytes: emailAttachments.map((attachment) => attachment.content?.length || 0),
-          apiKeyPresent: !!emailConfig.config.apiKey,
-          apiKeyPreview: redactApiKey(emailConfig.config.apiKey)
-        }, 'Brevo payload prepared');
-
-        appendEmailDebugLog('brevo_payload_prepared', {
-          provider: 'brevo',
-          senderEmail: brevoPayload.sender.email,
-          senderName: brevoPayload.sender.name,
-          recipient,
-          subject,
-          subjectLength: String(subject).length,
-          htmlContentLength: String(bodyWithTracking).length,
-          attachmentCount: emailAttachments.length,
-          inlineAttachmentCount: emailAttachments.filter((attachment) => attachment.cid).length,
-          attachmentBytes: emailAttachments.map((attachment) => attachment.content?.length || 0),
-          apiKeyPresent: !!emailConfig.config.apiKey,
-          apiKeyPreview: redactApiKey(emailConfig.config.apiKey)
-        });
-
-        const brevoResponse = await axios.post(
-          'https://api.brevo.com/v3/smtp/email',
-          brevoPayload,
-          {
-            headers: {
-              'api-key': emailConfig.config.apiKey,
-              'Content-Type': 'application/json'
-            }
-          }
-        );
-        providerMessageId = brevoResponse.data?.messageId || brevoResponse.data?.id || null;
-        logger.info({ recipient, brevoResponse: brevoResponse.data }, '✅ Email sent successfully via Brevo');
-        appendEmailDebugLog('brevo_send_success', {
-          provider: 'brevo',
-          senderEmail: brevoPayload.sender.email,
-          recipient,
-          subject,
-          providerStatus: brevoResponse.status,
-          providerResponse: brevoResponse.data
-        });
-        break;
-
-      default:
-        throw new Error('Unsupported email provider');
-    }
+    providerMessageId = sendResult.providerMessageId || sendResult.messageId || null;
 
     if (shouldStoreLocalSentEmail) {
       try {
@@ -960,7 +703,7 @@ const testEmailConnection = async (emailConfig, user) => {
         return { success: false, message: 'Unsupported provider' };
     }
   } catch (error) {
-    console.error('Test connection error:', error);
+    logger.error({ err: error, provider }, 'Test connection error');
     return { success: false, message: error.message || 'Connection test failed' };
   }
 };

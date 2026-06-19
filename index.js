@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -8,6 +9,8 @@ const passport = require('passport');
 const cron = require('node-cron');
 const pinoHttp = require('pino-http');
 const logger = require('./utils/logger');
+const systemController = require('./controllers/systemController');
+const realtimeHub = require('./services/realtime/campaignRealtimeHub');
 
 const app = express();
 const jsonBodyLimit = process.env.JSON_BODY_LIMIT || '5mb';
@@ -92,6 +95,8 @@ app.use('/api/campaigns', require('./routes/campaigns'));
 app.use('/api/tracking', require('./routes/tracking'));
 app.use('/api/analytics', require('./routes/analytics'));
 app.use('/api/emails', require('./routes/emails'));
+app.use('/api/metrics', require('./routes/metrics'));
+app.get('/health', systemController.getHealth);
 
 // Tracking pixel endpoint
 app.get('/track/:trackingId', require('./controllers/trackingController').trackOpen);
@@ -124,8 +129,11 @@ app.use((err, req, res, next) => {
   });
 });
 
+const server = http.createServer(app);
+realtimeHub.attach(server);
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   logger.info({ 
     port: PORT, 
     env: process.env.NODE_ENV,

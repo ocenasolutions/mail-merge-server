@@ -1,5 +1,4 @@
 const mongoose = require('mongoose');
-// 
 const campaignSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -58,12 +57,43 @@ const campaignSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['draft', 'scheduled', 'sending', 'completed', 'paused', 'failed'],
+    enum: ['draft', 'scheduled', 'queued', 'sending', 'completed', 'paused', 'failed'],
     default: 'draft'
   },
   scheduledAt: Date,
   startedAt: Date,
   completedAt: Date,
+  queue: {
+    workerCount: {
+      type: Number,
+      default: 4
+    },
+    batchSize: {
+      type: Number,
+      default: 25
+    },
+    throttledUntil: Date,
+    lastError: {
+      message: String,
+      statusCode: Number,
+      providerStatus: String,
+      retryAfterMs: Number
+    },
+    lastDispatchedAt: Date,
+    pausedAt: Date,
+    completedJobCount: {
+      type: Number,
+      default: 0
+    },
+    failedJobCount: {
+      type: Number,
+      default: 0
+    },
+    retryJobCount: {
+      type: Number,
+      default: 0
+    }
+  },
   stats: {
     total: { type: Number, default: 0 },
     sent: { type: Number, default: 0 },

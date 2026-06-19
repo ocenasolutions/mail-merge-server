@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { protect } = require('../middleware/auth');
 const SignatureAsset = require('../models/SignatureAsset');
+const logger = require('../utils/logger');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -115,7 +116,7 @@ router.get('/google', (req, res, next) => {
     origin = defaultOrigin;
   }
   
-  console.log('Initiating OAuth with origin:', origin);
+  logger.info({ origin }, 'Initiating OAuth flow');
   
   // Always force consent to ensure fresh tokens with all scopes
   passport.authenticate('google', {
@@ -173,11 +174,10 @@ router.get('/google/callback',
         }
       }
     } catch (error) {
-      console.error('Error decoding state:', error);
+      logger.error({ err: error }, 'Error decoding OAuth state');
     }
 
-    console.log('Redirecting to frontend:', frontendUrl);
-    console.log('Full redirect URL:', `${frontendUrl}/auth/callback`);
+    logger.info({ frontendUrl, redirectUrl: `${frontendUrl}/auth/callback` }, 'Redirecting to frontend');
     
     // IMPORTANT: Redirect to FRONTEND, not backend
     res.redirect(`${frontendUrl}/auth/callback?token=${token}&user=${encodeURIComponent(JSON.stringify(userData))}`);

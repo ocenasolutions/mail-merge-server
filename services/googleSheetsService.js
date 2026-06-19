@@ -1,4 +1,5 @@
 const { google } = require('googleapis');
+const logger = require('../utils/logger');
 
 const getAuthClient = (accessToken, refreshToken) => {
   const oauth2Client = new google.auth.OAuth2(
@@ -121,7 +122,7 @@ const updateSheetWithStatus = async (sheetId, accessToken, refreshToken, emailCo
 
     return { success: true, updatedRows: updates.length };
   } catch (error) {
-    console.error('Update sheet error:', error);
+    logger.error({ err: error, sheetId }, 'Update sheet error');
     throw new Error('Failed to update sheet: ' + error.message);
   }
 };
@@ -175,7 +176,7 @@ const getSheetData = async (sheetId, accessToken, refreshToken) => {
       totalRows: dataRows.length
     };
   } catch (error) {
-    console.error('Google Sheets API error:', error);
+    logger.error({ err: error, sheetId }, 'Google Sheets API error');
     
     if (error.message && error.message.includes('refresh token')) {
       throw new Error('Google authentication expired. Please log out and log in again to reconnect Google Sheets.');

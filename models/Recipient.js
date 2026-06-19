@@ -16,11 +16,31 @@ const recipientSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'sent', 'failed', 'bounced'],
+    enum: ['pending', 'processing', 'retrying', 'sent', 'failed', 'paused', 'bounced'],
     default: 'pending'
   },
+  deliveryJobId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'CampaignDispatchJob'
+  },
+  attemptCount: {
+    type: Number,
+    default: 0
+  },
+  lastAttemptAt: Date,
+  nextAttemptAt: Date,
+  lockedBy: String,
+  lockedAt: Date,
+  leaseExpiresAt: Date,
+  idempotencyKey: {
+    type: String,
+    index: true
+  },
+  jobKey: String,
+  messageId: String,
   sentAt: Date,
   sentSubject: String,
+  providerMessageId: String,
   replyCount: {
     type: Number,
     default: 0
@@ -45,5 +65,7 @@ const recipientSchema = new mongoose.Schema({
 
 recipientSchema.index({ campaignId: 1, email: 1 }, { unique: true });
 recipientSchema.index({ trackingId: 1 }, { unique: true, sparse: true });
+recipientSchema.index({ campaignId: 1, status: 1, nextAttemptAt: 1 });
+recipientSchema.index({ campaignId: 1, leaseExpiresAt: 1 });
 
 module.exports = mongoose.model('Recipient', recipientSchema);
