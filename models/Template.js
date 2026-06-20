@@ -23,7 +23,13 @@ const templateSchema = new mongoose.Schema({
   },
   thumbnail: {
     type: String
-  }
+  },
+  attachments: [{
+    name: String,
+    mimeType: String,
+    size: Number,
+    contentBase64: String
+  }]
 }, {
   timestamps: true
 });

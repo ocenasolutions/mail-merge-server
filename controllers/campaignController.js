@@ -255,16 +255,44 @@ exports.createCampaign = async (req, res) => {
     const resolvedEmailConfig = campaignData.emailConfigId
       ? await EmailConfig.findOne({ _id: campaignData.emailConfigId, userId: req.user._id })
       : await resolveCampaignEmailConfig(req.user._id);
+    let existingAttachments = [];
+    if (req.body.attachments) {
+      try {
+        const raw = Array.isArray(req.body.attachments)
+          ? req.body.attachments
+          : JSON.parse(req.body.attachments);
+        
+        existingAttachments = (raw || []).map((att) => ({
+          name: att.name,
+          mimeType: att.mimeType || 'application/octet-stream',
+          size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
+          contentBase64: att.contentBase64
+        }));
+      } catch (err) {
+        existingAttachments = [];
+      }
+    }
+
     const uploadedAttachments = Array.isArray(req.files) ? req.files : [];
-    const blockedAttachment = uploadedAttachments.find((file) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(file.originalname)));
+    const allAttachments = [
+      ...existingAttachments,
+      ...uploadedAttachments.map((file) => ({
+        name: file.originalname,
+        mimeType: file.mimetype || 'application/octet-stream',
+        size: file.size || 0,
+        contentBase64: file.buffer.toString('base64')
+      }))
+    ];
+
+    const blockedAttachment = allAttachments.find((file) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(file.name)));
 
     if (blockedAttachment) {
-      return res.status(400).json({ success: false, message: `Attachment type not allowed: ${blockedAttachment.originalname}` });
+      return res.status(400).json({ success: false, message: `Attachment type not allowed: ${blockedAttachment.name}` });
     }
 
     const providerKey = resolvedEmailConfig?.provider || 'gmail';
     const providerLimit = PROVIDER_ATTACHMENT_LIMITS[providerKey] || PROVIDER_ATTACHMENT_LIMITS.smtp;
-    const totalAttachmentBytes = uploadedAttachments.reduce((sum, file) => sum + (file.size || 0), 0);
+    const totalAttachmentBytes = allAttachments.reduce((sum, file) => sum + (file.size || 0), 0);
 
     if (totalAttachmentBytes > providerLimit) {
       return res.status(400).json({
@@ -278,12 +306,7 @@ exports.createCampaign = async (req, res) => {
       ...campaignData,
       recipientSource,
       emailConfigId: resolvedEmailConfig?._id,
-      attachments: uploadedAttachments.map((file) => ({
-        name: file.originalname,
-        mimeType: file.mimetype || 'application/octet-stream',
-        size: file.size || 0,
-        contentBase64: file.buffer.toString('base64')
-      })),
+      attachments: allAttachments,
       userId: req.user._id,
       stats: {
         total: 0,
@@ -338,6 +361,15 @@ exports.updateCampaign = async (req, res) => {
 
     if (campaign.status === 'sending') {
       return res.status(400).json({ success: false, message: 'Cannot update campaign while sending' });
+    }
+
+    if (req.body.attachments && Array.isArray(req.body.attachments)) {
+      req.body.attachments = req.body.attachments.map((att) => ({
+        name: att.name,
+        mimeType: att.mimeType || 'application/octet-stream',
+        size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
+        contentBase64: att.contentBase64
+      }));
     }
 
     Object.assign(campaign, req.body);

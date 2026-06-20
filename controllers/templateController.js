@@ -89,8 +89,37 @@ exports.getTemplate = async (req, res) => {
 
 exports.createTemplate = async (req, res) => {
   try {
+    let attachments = [];
+    if (req.body.attachments) {
+      try {
+        const raw = Array.isArray(req.body.attachments)
+          ? req.body.attachments
+          : JSON.parse(req.body.attachments);
+        
+        attachments = (raw || []).map((att) => ({
+          name: att.name,
+          mimeType: att.mimeType || 'application/octet-stream',
+          size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
+          contentBase64: att.contentBase64
+        }));
+      } catch (err) {
+        // ignore
+      }
+    }
+
+    const uploadedAttachments = req.files || [];
+    const newAttachments = uploadedAttachments.map((file) => ({
+      name: file.originalname,
+      mimeType: file.mimetype || 'application/octet-stream',
+      size: file.size || 0,
+      contentBase64: file.buffer.toString('base64')
+    }));
+
+    const finalAttachments = [...attachments, ...newAttachments];
+
     const template = await Template.create({
       ...normalizeTemplatePayload(req.body),
+      attachments: finalAttachments,
       userId: req.user._id
     });
 
@@ -102,9 +131,40 @@ exports.createTemplate = async (req, res) => {
 
 exports.updateTemplate = async (req, res) => {
   try {
+    let attachments = [];
+    if (req.body.attachments) {
+      try {
+        const raw = Array.isArray(req.body.attachments)
+          ? req.body.attachments
+          : JSON.parse(req.body.attachments);
+        
+        attachments = (raw || []).map((att) => ({
+          name: att.name,
+          mimeType: att.mimeType || 'application/octet-stream',
+          size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
+          contentBase64: att.contentBase64
+        }));
+      } catch (err) {
+        // ignore
+      }
+    }
+
+    const uploadedAttachments = req.files || [];
+    const newAttachments = uploadedAttachments.map((file) => ({
+      name: file.originalname,
+      mimeType: file.mimetype || 'application/octet-stream',
+      size: file.size || 0,
+      contentBase64: file.buffer.toString('base64')
+    }));
+
+    const finalAttachments = [...attachments, ...newAttachments];
+
     const template = await Template.findOneAndUpdate(
       { _id: req.params.id, userId: req.user._id },
-      normalizeTemplatePayload(req.body),
+      {
+        ...normalizeTemplatePayload(req.body),
+        attachments: finalAttachments
+      },
       { new: true, runValidators: true }
     );
 

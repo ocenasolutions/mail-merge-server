@@ -66,10 +66,7 @@ const buildJobUpsert = ({ campaign, recipient, reset = false }) => {
           campaignId: campaign._id,
           userId: campaign.userId,
           recipientId: recipient._id,
-          recipientEmail: recipient.email,
-          jobKey: buildJobKey(campaign._id, recipient._id),
           idempotencyKey: buildIdempotencyKey(campaign._id, recipient._id),
-          messageId: buildMessageId(campaign._id, recipient._id),
           metadata: {
             mergeData: toPlainObject(recipient.mergeData),
             trackingId: recipient.trackingId || null
