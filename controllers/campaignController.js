@@ -322,7 +322,19 @@ exports.createCampaign = async (req, res) => {
     let finalRecipients = Array.isArray(parsedRecipients) ? parsedRecipients : [];
 
     if (finalRecipients && finalRecipients.length > 0) {
-      const recipientDocs = finalRecipients.map((r) => ({
+      // Deduplicate by email address case-insensitively to prevent E11000 duplicate key error
+      const seenEmails = new Set();
+      const uniqueRecipients = [];
+      for (const r of finalRecipients) {
+        if (!r.email) continue;
+        const emailLower = String(r.email).trim().toLowerCase();
+        if (!seenEmails.has(emailLower)) {
+          seenEmails.add(emailLower);
+          uniqueRecipients.push(r);
+        }
+      }
+
+      const recipientDocs = uniqueRecipients.map((r) => ({
         mergeData: {
           ...(r.mergeData || {}),
           name: r.name || r.mergeData?.name || '',

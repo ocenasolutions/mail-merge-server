@@ -13,7 +13,7 @@ const systemController = require('./controllers/systemController');
 const realtimeHub = require('./services/realtime/campaignRealtimeHub');
 
 const app = express();
-const jsonBodyLimit = process.env.JSON_BODY_LIMIT || '5mb';
+const jsonBodyLimit = process.env.JSON_BODY_LIMIT || '50mb';
 
 // Pino HTTP logger middleware
 app.use(pinoHttp({
