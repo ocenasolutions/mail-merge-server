@@ -167,10 +167,34 @@ exports.trackOpen = async (req, res) => {
 exports.trackClick = async (req, res) => {
   try {
     const { trackingId } = req.params;
-    const targetUrl = req.query.url;
+    let targetUrl = req.query.url;
 
     if (!targetUrl) {
       return res.status(400).send('Missing target URL');
+    }
+
+    // Proactive recovery fallback for placeholder/broken redirects (e.g. href="https://")
+    if (targetUrl === 'https://' || targetUrl === 'http://' || targetUrl === 'https' || targetUrl === 'http') {
+      try {
+        const target = await resolveTrackedTarget(trackingId);
+        if (target && target.type === 'campaign') {
+          const campaign = await Campaign.findById(target.recipient.campaignId);
+          if (campaign) {
+            const content = campaign.htmlBody || campaign.body || '';
+            const urlRegex = /https?:\/\/[^\s"'<>\(\)]+/gi;
+            let match;
+            while ((match = urlRegex.exec(content)) !== null) {
+              const foundUrl = match[0];
+              if (foundUrl.length > 10 && !foundUrl.includes('tracking') && !foundUrl.includes('mail-merge-server')) {
+                targetUrl = foundUrl;
+                break;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, trackingId }, 'Error resolving recovery redirect URL');
+      }
     }
 
     const target = await resolveTrackedTarget(trackingId);
