@@ -270,27 +270,54 @@ const decodeHtmlEntities = (value) => value
   .replace(/&#39;/gi, '\'')
   .replace(/&amp;/gi, '&');
 
+const autoLinkTextUrls = (html) => {
+  if (!html) return html;
+  const parts = html.split(/(<\/?[a-zA-Z0-9]+(?:\s+[^>]*?)?>)/g);
+  let inAnchor = false;
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (part.startsWith('<')) {
+      const tagNameMatch = part.match(/^<\/?([a-zA-Z0-9]+)/);
+      if (tagNameMatch) {
+        const tagName = tagNameMatch[1].toLowerCase();
+        if (tagName === 'a') {
+          inAnchor = !part.startsWith('</');
+        }
+      }
+    } else if (!inAnchor) {
+      const urlRegex = /(https?:\/\/[^\s"'<>\(\)]+)/gi;
+      parts[i] = part.replace(urlRegex, (url) => {
+        return `<a href="${url}" style="color: #dc2626; text-decoration: underline;">${url}</a>`;
+      });
+    }
+  }
+
+  return parts.join('');
+};
+
 const normalizeEmailBody = (body) => {
   if (!body) return body;
   const decodedBody = decodeHtmlEntities(body);
 
+  let html;
   if (hasHtml(decodedBody) && hasBlockHtml(decodedBody)) {
-    return decodedBody;
-  }
-
-  if (hasHtml(decodedBody)) {
-    return decodedBody
+    html = decodedBody;
+  } else if (hasHtml(decodedBody)) {
+    html = decodedBody
       .split(/\r?\n\r?\n+/)
       .map((paragraph) => paragraph.trim())
       .filter(Boolean)
       .map((paragraph) => `<p>${paragraph.replace(/\r?\n/g, '<br>')}</p>`)
       .join('');
+  } else {
+    html = escapeHtml(decodedBody)
+      .split(/\r?\n\r?\n+/)
+      .map((paragraph) => `<p>${paragraph.replace(/\r?\n/g, '<br>')}</p>`)
+      .join('');
   }
 
-  return escapeHtml(decodedBody)
-    .split(/\r?\n\r?\n+/)
-    .map((paragraph) => `<p>${paragraph.replace(/\r?\n/g, '<br>')}</p>`)
-    .join('');
+  return autoLinkTextUrls(html);
 };
 
 const stripHtmlForPreview = (value = '') => String(value)

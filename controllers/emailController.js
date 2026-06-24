@@ -230,15 +230,44 @@ const escapeHtml = (value = '') => value
   .replace(/"/g, '&quot;')
   .replace(/'/g, '&#39;');
 
-const normalizeEmailBody = (body = '') => {
-  if (/<\/?[a-z][\s\S]*>/i.test(body)) {
-    return body;
+const autoLinkTextUrls = (html) => {
+  if (!html) return html;
+  const parts = html.split(/(<\/?[a-zA-Z0-9]+(?:\s+[^>]*?)?>)/g);
+  let inAnchor = false;
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (part.startsWith('<')) {
+      const tagNameMatch = part.match(/^<\/?([a-zA-Z0-9]+)/);
+      if (tagNameMatch) {
+        const tagName = tagNameMatch[1].toLowerCase();
+        if (tagName === 'a') {
+          inAnchor = !part.startsWith('</');
+        }
+      }
+    } else if (!inAnchor) {
+      const urlRegex = /(https?:\/\/[^\s"'<>\(\)]+)/gi;
+      parts[i] = part.replace(urlRegex, (url) => {
+        return `<a href="${url}" style="color: #dc2626; text-decoration: underline;">${url}</a>`;
+      });
+    }
   }
 
-  return escapeHtml(body)
-    .split(/\r?\n\r?\n+/)
-    .map((paragraph) => `<p>${paragraph.replace(/\r?\n/g, '<br>')}</p>`)
-    .join('');
+  return parts.join('');
+};
+
+const normalizeEmailBody = (body = '') => {
+  let html;
+  if (/<\/?[a-z][\s\S]*>/i.test(body)) {
+    html = body;
+  } else {
+    html = escapeHtml(body)
+      .split(/\r?\n\r?\n+/)
+      .map((paragraph) => `<p>${paragraph.replace(/\r?\n/g, '<br>')}</p>`)
+      .join('');
+  }
+
+  return autoLinkTextUrls(html);
 };
 
 const escapeAttribute = (value) => String(value)
