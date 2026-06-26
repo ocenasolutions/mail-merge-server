@@ -35,7 +35,7 @@ const appendAttachmentPart = (lines, boundary, attachment) => {
   ], chunkBase64(Buffer.from(attachment.content).toString('base64')));
 };
 
-const buildRawMimeMessage = ({ from, to, subject, textBody, htmlBody, trackingId, cc, bcc, attachments = [] }) => {
+const buildRawMimeMessage = ({ from, to, subject, textBody, htmlBody, trackingId, cc, bcc, attachments = [] }, options = {}) => {
   const mixedBoundary = `emaildrop_mixed_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const relatedBoundary = `emaildrop_related_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const alternativeBoundary = `emaildrop_alternative_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -45,10 +45,11 @@ const buildRawMimeMessage = ({ from, to, subject, textBody, htmlBody, trackingId
   const hasRegularAttachments = regularAttachments.length > 0;
   const outerBoundary = hasRegularAttachments ? mixedBoundary : hasInlineAttachments ? relatedBoundary : alternativeBoundary;
   const outerType = hasRegularAttachments ? 'multipart/mixed' : hasInlineAttachments ? 'multipart/related' : 'multipart/alternative';
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject || '').toString('base64')}?=`;
   const lines = [
     `From: ${from}`,
     `To: ${to}`,
-    `Subject: ${subject}`,
+    `Subject: ${encodedSubject}`,
     'MIME-Version: 1.0',
     `Content-Type: ${outerType}; boundary="${outerBoundary}"`
   ];
@@ -92,7 +93,12 @@ const buildRawMimeMessage = ({ from, to, subject, textBody, htmlBody, trackingId
 
   lines.push('');
 
-  return Buffer.from(lines.join('\r\n'))
+  const mimeBuffer = Buffer.from(lines.join('\r\n'));
+  if (options.returnBuffer) {
+    return mimeBuffer;
+  }
+
+  return mimeBuffer
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')

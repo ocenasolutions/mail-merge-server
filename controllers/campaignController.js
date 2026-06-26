@@ -266,22 +266,51 @@ exports.createCampaign = async (req, res) => {
           name: att.name,
           mimeType: att.mimeType || 'application/octet-stream',
           size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
-          contentBase64: att.contentBase64
+          contentBase64: att.contentBase64,
+          url: att.url
         }));
       } catch (err) {
         existingAttachments = [];
       }
     }
 
+    const s3Service = require('../services/s3Service');
     const uploadedAttachments = Array.isArray(req.files) ? req.files : [];
+    const processedUploadedAttachments = await Promise.all(
+      uploadedAttachments.map(async (file) => {
+        if (s3Service.isConfigured()) {
+          try {
+            const url = await s3Service.uploadToS3(file.buffer, file.originalname, file.mimetype || 'application/octet-stream');
+            return {
+              name: file.originalname,
+              mimeType: file.mimetype || 'application/octet-stream',
+              size: file.size || 0,
+              contentBase64: '',
+              url
+            };
+          } catch (s3Error) {
+            logger.error({ err: s3Error }, 'Failed to upload attachment to S3, falling back to Base64');
+            return {
+              name: file.originalname,
+              mimeType: file.mimetype || 'application/octet-stream',
+              size: file.size || 0,
+              contentBase64: file.buffer.toString('base64')
+            };
+          }
+        } else {
+          return {
+            name: file.originalname,
+            mimeType: file.mimetype || 'application/octet-stream',
+            size: file.size || 0,
+            contentBase64: file.buffer.toString('base64')
+          };
+        }
+      })
+    );
+
     const allAttachments = [
       ...existingAttachments,
-      ...uploadedAttachments.map((file) => ({
-        name: file.originalname,
-        mimeType: file.mimetype || 'application/octet-stream',
-        size: file.size || 0,
-        contentBase64: file.buffer.toString('base64')
-      }))
+      ...processedUploadedAttachments
     ];
 
     const blockedAttachment = allAttachments.find((file) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(file.name)));
@@ -380,7 +409,8 @@ exports.updateCampaign = async (req, res) => {
         name: att.name,
         mimeType: att.mimeType || 'application/octet-stream',
         size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
-        contentBase64: att.contentBase64
+        contentBase64: att.contentBase64,
+        url: att.url
       }));
     }
 

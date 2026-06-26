@@ -35,7 +35,8 @@ const campaignSchema = new mongoose.Schema({
     name: { type: String, required: true },
     mimeType: { type: String, default: 'application/octet-stream' },
     size: { type: Number, default: 0 },
-    contentBase64: { type: String, required: true }
+    contentBase64: { type: String, required: false },
+    url: { type: String, required: false }
   }],
   trackingEnabled: {
     type: Boolean,

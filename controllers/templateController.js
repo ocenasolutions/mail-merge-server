@@ -56,7 +56,7 @@ const normalizeTemplatePayload = (payload = {}) => {
 
 exports.getTemplates = async (req, res) => {
   try {
-    const templates = await Template.find({ userId: req.user._id });
+    const templates = await Template.find({ userId: req.user._id }).select('-attachments.contentBase64');
     res.json({
       success: true,
       data: templates.map((template) => ({
@@ -100,20 +100,48 @@ exports.createTemplate = async (req, res) => {
           name: att.name,
           mimeType: att.mimeType || 'application/octet-stream',
           size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
-          contentBase64: att.contentBase64
+          contentBase64: att.contentBase64,
+          url: att.url
         }));
       } catch (err) {
         // ignore
       }
     }
 
+    const s3Service = require('../services/s3Service');
+    const logger = require('../utils/logger');
     const uploadedAttachments = req.files || [];
-    const newAttachments = uploadedAttachments.map((file) => ({
-      name: file.originalname,
-      mimeType: file.mimetype || 'application/octet-stream',
-      size: file.size || 0,
-      contentBase64: file.buffer.toString('base64')
-    }));
+    const newAttachments = await Promise.all(
+      uploadedAttachments.map(async (file) => {
+        if (s3Service.isConfigured()) {
+          try {
+            const url = await s3Service.uploadToS3(file.buffer, file.originalname, file.mimetype || 'application/octet-stream');
+            return {
+              name: file.originalname,
+              mimeType: file.mimetype || 'application/octet-stream',
+              size: file.size || 0,
+              contentBase64: '',
+              url
+            };
+          } catch (s3Error) {
+            logger.error({ err: s3Error }, 'Failed to upload template attachment to S3, falling back to Base64');
+            return {
+              name: file.originalname,
+              mimeType: file.mimetype || 'application/octet-stream',
+              size: file.size || 0,
+              contentBase64: file.buffer.toString('base64')
+            };
+          }
+        } else {
+          return {
+            name: file.originalname,
+            mimeType: file.mimetype || 'application/octet-stream',
+            size: file.size || 0,
+            contentBase64: file.buffer.toString('base64')
+          };
+        }
+      })
+    );
 
     const finalAttachments = [...attachments, ...newAttachments];
 
@@ -142,20 +170,48 @@ exports.updateTemplate = async (req, res) => {
           name: att.name,
           mimeType: att.mimeType || 'application/octet-stream',
           size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
-          contentBase64: att.contentBase64
+          contentBase64: att.contentBase64,
+          url: att.url
         }));
       } catch (err) {
         // ignore
       }
     }
 
+    const s3Service = require('../services/s3Service');
+    const logger = require('../utils/logger');
     const uploadedAttachments = req.files || [];
-    const newAttachments = uploadedAttachments.map((file) => ({
-      name: file.originalname,
-      mimeType: file.mimetype || 'application/octet-stream',
-      size: file.size || 0,
-      contentBase64: file.buffer.toString('base64')
-    }));
+    const newAttachments = await Promise.all(
+      uploadedAttachments.map(async (file) => {
+        if (s3Service.isConfigured()) {
+          try {
+            const url = await s3Service.uploadToS3(file.buffer, file.originalname, file.mimetype || 'application/octet-stream');
+            return {
+              name: file.originalname,
+              mimeType: file.mimetype || 'application/octet-stream',
+              size: file.size || 0,
+              contentBase64: '',
+              url
+            };
+          } catch (s3Error) {
+            logger.error({ err: s3Error }, 'Failed to upload template attachment to S3, falling back to Base64');
+            return {
+              name: file.originalname,
+              mimeType: file.mimetype || 'application/octet-stream',
+              size: file.size || 0,
+              contentBase64: file.buffer.toString('base64')
+            };
+          }
+        } else {
+          return {
+            name: file.originalname,
+            mimeType: file.mimetype || 'application/octet-stream',
+            size: file.size || 0,
+            contentBase64: file.buffer.toString('base64')
+          };
+        }
+      })
+    );
 
     const finalAttachments = [...attachments, ...newAttachments];
 

@@ -28,7 +28,8 @@ const templateSchema = new mongoose.Schema({
     name: String,
     mimeType: String,
     size: Number,
-    contentBase64: String
+    contentBase64: String,
+    url: String
   }]
 }, {
   timestamps: true

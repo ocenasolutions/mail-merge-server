@@ -6,13 +6,14 @@ const { syncAllCampaignStatsForUser } = require('../services/campaignStatsServic
 
 const lastSyncMap = new Map();
 
-const throttleSync = async (userId) => {
+const throttleSync = (userId) => {
   const now = Date.now();
   const lastSync = lastSyncMap.get(String(userId)) || 0;
   // Limit on-demand syncs to once every 5 minutes (300,000 ms) per user
   if (now - lastSync > 5 * 60 * 1000) {
     lastSyncMap.set(String(userId), now);
-    await Promise.all([
+    // Run sync in the background so it doesn't block the API response
+    Promise.all([
       syncAllCampaignStatsForUser(userId).catch(() => null),
       syncUserReplyStats(userId).catch(() => null)
     ]);

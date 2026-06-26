@@ -456,23 +456,34 @@ class CampaignPipelineService {
 
     metrics.setGauge('campaign_pipeline.claimed_jobs', workerBatches.length);
 
+    let preResolvedAttachments = [];
+    if (latestCampaign.attachments && latestCampaign.attachments.length > 0) {
+      const emailService = require('../emailService');
+      try {
+        preResolvedAttachments = await emailService.normalizeAttachments(latestCampaign.attachments);
+        logger.info({ campaignId, count: preResolvedAttachments.length }, 'Pre-resolved S3 attachments for campaign batch');
+      } catch (err) {
+        logger.error({ err, campaignId }, 'Failed to pre-resolve campaign attachments');
+      }
+    }
+
     const batches = [];
     for (let i = 0; i < workerBatches.length; i += this.batchSize) {
       batches.push(workerBatches.slice(i, i + this.batchSize));
     }
 
-    await Promise.allSettled(batches.map((batch) => this.processBatch(latestCampaign, batch)));
+    await Promise.allSettled(batches.map((batch) => this.processBatch(latestCampaign, batch, preResolvedAttachments)));
 
     await markCampaignCompletedIfIdle(latestCampaign._id);
   }
 
-  async processBatch(campaign, jobs) {
+  async processBatch(campaign, jobs, preResolvedAttachments = []) {
     for (const job of jobs) {
-      await this.processJob(campaign, job);
+      await this.processJob(campaign, job, preResolvedAttachments);
     }
   }
 
-  async processJob(campaign, job) {
+  async processJob(campaign, job, preResolvedAttachments = []) {
     const refreshCampaign = await Campaign.findById(campaign._id).populate('emailConfigId');
     if (!refreshCampaign || refreshCampaign.status === 'paused') {
       const recipient = await Recipient.findById(job.recipientId);
@@ -568,7 +579,8 @@ class CampaignPipelineService {
         campaign: refreshCampaign,
         recipient,
         user,
-        emailConfig
+        emailConfig,
+        preResolvedAttachments
       });
       const latencyMs = Date.now() - sendStartedAt;
 

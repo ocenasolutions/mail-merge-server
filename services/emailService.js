@@ -41,17 +41,38 @@ const formatProviderError = (error) => {
   return responseData.message || responseData.error || JSON.stringify(responseData);
 };
 
-const normalizeAttachments = (attachments = []) => attachments.map((attachment) => ({
-  filename: attachment.filename || attachment.name,
-  contentType: attachment.contentType || attachment.mimeType || 'application/octet-stream',
-  content: Buffer.isBuffer(attachment.content)
-    ? attachment.content
-    : Buffer.from(attachment.contentBase64 || '', 'base64'),
-  size: attachment.size || (attachment.content ? attachment.content.length : Buffer.from(attachment.contentBase64 || '', 'base64').length)
-}));
+const normalizeAttachments = async (attachments = []) => {
+  return Promise.all(
+    attachments.map(async (attachment) => {
+      let content;
+      if (Buffer.isBuffer(attachment.content)) {
+        content = attachment.content;
+      } else if (attachment.url) {
+        // If S3 URL is provided, download it to buffer (necessary for Gmail API/raw messages)
+        try {
+          const response = await axios.get(attachment.url, { responseType: 'arraybuffer' });
+          content = Buffer.from(response.data);
+        } catch (fetchError) {
+          logger.error({ err: fetchError, url: attachment.url }, 'Failed to download attachment from S3 URL');
+          content = Buffer.alloc(0);
+        }
+      } else {
+        content = Buffer.from(attachment.contentBase64 || '', 'base64');
+      }
 
-const validateAttachments = (provider, attachments = []) => {
-  const normalizedAttachments = normalizeAttachments(attachments);
+      return {
+        filename: attachment.filename || attachment.name,
+        contentType: attachment.contentType || attachment.mimeType || 'application/octet-stream',
+        content,
+        path: attachment.url || undefined, // nodemailer can stream directly from path
+        size: attachment.size || content.length
+      };
+    })
+  );
+};
+
+const validateAttachments = async (provider, attachments = []) => {
+  const normalizedAttachments = await normalizeAttachments(attachments);
   const blockedAttachment = normalizedAttachments.find((attachment) => BLOCKED_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(attachment.filename)));
 
   if (blockedAttachment) {
@@ -454,7 +475,9 @@ const inlineSignatureImages = async (html, existingAttachments = [], options = {
 };
 
 const createTransporter = async (emailConfig, user) => {
-  switch (emailConfig.provider) {
+  const isGmailSmtp = emailConfig.provider === 'gmail' && !emailConfig.gmailRefreshToken && (emailConfig.config?.password || emailConfig.smtpPassword);
+  const provider = isGmailSmtp ? 'smtp' : emailConfig.provider;
+  switch (provider) {
     case 'gmail':
       // For Gmail, we'll use Gmail API directly instead of SMTP
       // This works better with the gmail.send OAuth scope
@@ -496,7 +519,7 @@ const createTransporter = async (emailConfig, user) => {
 const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId, options = {}) => {
   try {
     const trackingEnabled = options.trackingEnabled !== false;
-    const attachments = validateAttachments(emailConfig.provider, options.attachments || []);
+    const attachments = await validateAttachments(emailConfig.provider, options.attachments || []);
     logger.info({ 
       recipient, 
       trackingId,
@@ -645,13 +668,20 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
 
 const testEmailConnection = async (emailConfig, user) => {
   try {
-    switch (emailConfig.provider) {
+    const isGmailSmtp = emailConfig.provider === 'gmail' && !emailConfig.gmailRefreshToken && (emailConfig.config?.password || emailConfig.smtpPassword);
+    
+    switch (isGmailSmtp ? 'smtp' : emailConfig.provider) {
       case 'gmail':
-        // Check if we have refresh token
-        if (!user.googleRefreshToken) {
+        const isPrimary = emailConfig._id === 'gmail' || emailConfig.name === 'Primary Gmail';
+        const refreshToken = isPrimary ? user?.googleRefreshToken : emailConfig?.gmailRefreshToken;
+        const accessToken = isPrimary ? user?.googleAccessToken : emailConfig?.gmailAccessToken;
+
+        if (!refreshToken) {
           return { 
             success: false, 
-            message: 'Google authentication expired. Please log out and log in again to reconnect Gmail.' 
+            message: isPrimary 
+              ? 'Google authentication expired. Please log out and log in again to reconnect Gmail.' 
+              : 'Google authentication expired/missing for this account. Please reconnect in Settings.'
           };
         }
 
@@ -663,8 +693,8 @@ const testEmailConnection = async (emailConfig, user) => {
         );
 
         oauth2Client.setCredentials({
-          access_token: user.googleAccessToken,
-          refresh_token: user.googleRefreshToken
+          access_token: accessToken,
+          refresh_token: refreshToken
         });
 
         // Try to refresh token - this validates the OAuth setup
@@ -674,7 +704,9 @@ const testEmailConnection = async (emailConfig, user) => {
         } catch (error) {
           return { 
             success: false, 
-            message: 'Failed to refresh Gmail token. Please log out and log in again.' 
+            message: isPrimary
+              ? 'Failed to refresh Gmail token. Please log out and log in again.' 
+              : 'Failed to refresh Gmail token. Please reconnect this account in Settings.'
           };
         }
 
@@ -739,5 +771,6 @@ module.exports = {
   mergeTags,
   sendEmail,
   testEmailConnection,
-  createTransporter
+  createTransporter,
+  normalizeAttachments
 };

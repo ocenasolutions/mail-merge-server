@@ -18,7 +18,7 @@ const buildDeliveryContext = ({ campaign, recipient, user, emailConfig }) => {
   };
 };
 
-const sendCampaignEmail = async ({ campaign, recipient, user, emailConfig }) => {
+const sendCampaignEmail = async ({ campaign, recipient, user, emailConfig, preResolvedAttachments = [] }) => {
   const delivery = buildDeliveryContext({ campaign, recipient, user, emailConfig });
   const result = await sendEmail(
     emailConfig,
@@ -29,7 +29,7 @@ const sendCampaignEmail = async ({ campaign, recipient, user, emailConfig }) => 
     recipient.trackingId,
     {
       trackingEnabled: campaign.trackingEnabled !== false,
-      attachments: campaign.attachments || []
+      attachments: preResolvedAttachments.length > 0 ? preResolvedAttachments : (campaign.attachments || [])
     }
   );
 

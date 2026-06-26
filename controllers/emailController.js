@@ -550,13 +550,34 @@ exports.sendEmail = async (req, res) => {
   try {
     const { to, subject, content, cc, bcc, isTracked, accountId, account } = req.body;
     const userId = req.user._id;
-    const attachments = Array.isArray(req.files) ? req.files.map((file) => ({
+    let parsedExistingAttachments = [];
+    if (req.body.attachments) {
+      try {
+        const raw = Array.isArray(req.body.attachments)
+          ? req.body.attachments
+          : JSON.parse(req.body.attachments);
+        parsedExistingAttachments = (raw || []).map((att) => ({
+          filename: att.filename || att.name,
+          contentType: att.contentType || att.mimeType || 'application/octet-stream',
+          contentBase64: att.contentBase64,
+          url: att.url,
+          size: att.size || 0,
+          disposition: att.disposition || 'attachment'
+        }));
+      } catch (err) {
+        // ignore
+      }
+    }
+
+    const uploadedAttachments = Array.isArray(req.files) ? req.files.map((file) => ({
       filename: file.originalname,
       contentType: file.mimetype || 'application/octet-stream',
       content: file.buffer,
       size: file.size || (file.buffer ? file.buffer.length : 0),
       disposition: 'attachment'
     })) : [];
+
+    const attachments = [...parsedExistingAttachments, ...uploadedAttachments];
 
     const user = await User.findById(userId);
 

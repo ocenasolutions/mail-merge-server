@@ -3,8 +3,16 @@ const User = require('../../models/User');
 const { buildRawMimeMessage } = require('./utils');
 
 const send = async ({ emailConfig, user, recipient, subject, htmlBody, textBody, trackingId, cc, bcc, attachments = [] }) => {
-  if (!user?.googleRefreshToken) {
-    throw new Error('Google authentication expired. Please reconnect Gmail.');
+  const isPrimary = !emailConfig || emailConfig._id === 'gmail' || emailConfig.name === 'Primary Gmail';
+  const refreshToken = isPrimary ? user?.googleRefreshToken : emailConfig?.gmailRefreshToken;
+  const accessToken = isPrimary ? user?.googleAccessToken : emailConfig?.gmailAccessToken;
+
+  if (!refreshToken) {
+    if (isPrimary) {
+      throw new Error('Google authentication expired. Please log out and log in again.');
+    } else {
+      throw new Error(`Gmail account (${emailConfig?.config?.email || 'selected account'}) is not authenticated or refresh token is missing. Please reconnect this account in Settings.`);
+    }
   }
 
   const oauth2Client = new google.auth.OAuth2(
@@ -14,22 +22,30 @@ const send = async ({ emailConfig, user, recipient, subject, htmlBody, textBody,
   );
 
   oauth2Client.setCredentials({
-    access_token: user.googleAccessToken,
-    refresh_token: user.googleRefreshToken
+    access_token: accessToken,
+    refresh_token: refreshToken
   });
 
   try {
     const { credentials } = await oauth2Client.refreshAccessToken();
-    if (credentials.access_token && credentials.access_token !== user.googleAccessToken) {
-      await User.findByIdAndUpdate(user._id, { googleAccessToken: credentials.access_token });
+    if (credentials.access_token && credentials.access_token !== accessToken) {
+      if (emailConfig?.gmailRefreshToken) {
+        emailConfig.gmailAccessToken = credentials.access_token;
+        await emailConfig.save();
+      } else {
+        await User.findByIdAndUpdate(user._id, { googleAccessToken: credentials.access_token });
+      }
     }
   } catch (error) {
-    // Token refresh failures fall through to the send call, which returns the actionable provider error.
+    if (!isPrimary) {
+      throw new Error(`Failed to authenticate Gmail account (${emailConfig?.config?.email || 'selected account'}). Access may have been revoked. Please reconnect this account in Settings.`);
+    }
+    // For primary account, fall through to let the Google API return the direct error
   }
 
   const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-  const raw = buildRawMimeMessage({
-    from: emailConfig.config.email || user.email,
+  const mimeBuffer = buildRawMimeMessage({
+    from: emailConfig?.config?.email || user.email,
     to: recipient,
     subject,
     textBody,
@@ -38,11 +54,14 @@ const send = async ({ emailConfig, user, recipient, subject, htmlBody, textBody,
     cc,
     bcc,
     attachments
-  });
+  }, { returnBuffer: true });
 
   const response = await gmail.users.messages.send({
     userId: 'me',
-    requestBody: { raw }
+    media: {
+      mimeType: 'message/rfc822',
+      body: mimeBuffer
+    }
   });
 
   return {

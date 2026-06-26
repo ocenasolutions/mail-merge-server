@@ -21,10 +21,18 @@ const providers = {
   ses: sesProvider
 };
 
-const resolveProvider = (providerName = 'smtp') => providers[String(providerName || 'smtp').toLowerCase()] || smtpProvider;
+const resolveProvider = (emailConfig) => {
+  const providerName = String(emailConfig?.provider || 'smtp').toLowerCase();
+  
+  if (providerName === 'gmail' && emailConfig && !emailConfig.gmailRefreshToken && (emailConfig.config?.password || emailConfig.smtpPassword)) {
+    return smtpProvider;
+  }
+  
+  return providers[providerName] || smtpProvider;
+};
 
 const send = async (payload) => limiter.schedule(async () => {
-  const provider = resolveProvider(payload?.emailConfig?.provider);
+  const provider = resolveProvider(payload?.emailConfig);
   const startedAt = Date.now();
   try {
     const result = await provider.send(payload);
