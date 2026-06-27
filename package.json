@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon index.js",
-    "start": "node index.js",
+    "start": "node --max-old-space-size=450 index.js",
     "test": "node --test tests/campaignPipeline.smoke.test.js"
   },
   "keywords": [

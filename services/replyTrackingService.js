@@ -323,7 +323,7 @@ const syncUserReplyStats = async (userId) => {
     return null;
   }
 
-  const campaigns = await Campaign.find({ userId }).select('_id subject stats');
+  const campaigns = await Campaign.find({ userId }).select('_id subject stats').lean();
   if (!campaigns.length) {
     return {
       totalReplies: 0,
@@ -336,7 +336,7 @@ const syncUserReplyStats = async (userId) => {
     campaignId: { $in: campaigns.map((campaign) => campaign._id) },
     status: 'sent',
     sentAt: { $ne: null }
-  });
+  }).lean();
 
   if (!recipients.length) {
     await Campaign.updateMany(
@@ -350,7 +350,7 @@ const syncUserReplyStats = async (userId) => {
     };
   }
 
-  const configs = await EmailConfig.find({ userId });
+  const configs = await EmailConfig.find({ userId }).lean();
   const inboxMessages = await loadInboxMessagesForUser(user, configs);
   const messagesBySender = new Map();
 
@@ -394,7 +394,9 @@ const syncUserReplyStats = async (userId) => {
     let leadScore = recipient.leadScore || 0;
     let leadReason = recipient.leadReason || '';
 
-    if (latestMatch) {
+    // Only fetch message details and score them if we actually have a new reply
+    // or if the snippet has not been populated yet.
+    if (latestMatch && (nextReplyCount > existingReplyCount || !recipient.latestReplySnippet)) {
       try {
         const detail = await getMessageDetail(latestMatch.mailboxConfig, user, {
           folder: 'inbox',
