@@ -1,24 +1,29 @@
 const axios = require('axios');
 
 const send = async ({ emailConfig, recipient, subject, htmlBody, textBody, attachments = [] }) => {
+  const payload = {
+    personalizations: [{ to: [{ email: recipient }] }],
+    from: { email: emailConfig.config.email },
+    subject,
+    content: [
+      { type: 'text/plain', value: textBody },
+      { type: 'text/html', value: htmlBody }
+    ]
+  };
+
+  if (attachments && attachments.length > 0) {
+    payload.attachments = attachments.map((attachment) => ({
+      content: Buffer.from(attachment.content).toString('base64'),
+      filename: attachment.filename,
+      type: attachment.contentType,
+      disposition: attachment.disposition || 'attachment',
+      content_id: attachment.cid
+    }));
+  }
+
   const response = await axios.post(
     'https://api.sendgrid.com/v3/mail/send',
-    {
-      personalizations: [{ to: [{ email: recipient }] }],
-      from: { email: emailConfig.config.email },
-      subject,
-      content: [
-        { type: 'text/plain', value: textBody },
-        { type: 'text/html', value: htmlBody }
-      ],
-      attachments: attachments.map((attachment) => ({
-        content: Buffer.from(attachment.content).toString('base64'),
-        filename: attachment.filename,
-        type: attachment.contentType,
-        disposition: attachment.disposition || 'attachment',
-        content_id: attachment.cid
-      }))
-    },
+    payload,
     {
       headers: {
         Authorization: `Bearer ${emailConfig.config.apiKey}`,

@@ -113,33 +113,17 @@ exports.createTemplate = async (req, res) => {
     const uploadedAttachments = req.files || [];
     const newAttachments = await Promise.all(
       uploadedAttachments.map(async (file) => {
-        if (s3Service.isConfigured()) {
-          try {
-            const url = await s3Service.uploadToS3(file.buffer, file.originalname, file.mimetype || 'application/octet-stream');
-            return {
-              name: file.originalname,
-              mimeType: file.mimetype || 'application/octet-stream',
-              size: file.size || 0,
-              contentBase64: '',
-              url
-            };
-          } catch (s3Error) {
-            logger.error({ err: s3Error }, 'Failed to upload template attachment to S3, falling back to Base64');
-            return {
-              name: file.originalname,
-              mimeType: file.mimetype || 'application/octet-stream',
-              size: file.size || 0,
-              contentBase64: file.buffer.toString('base64')
-            };
-          }
-        } else {
-          return {
-            name: file.originalname,
-            mimeType: file.mimetype || 'application/octet-stream',
-            size: file.size || 0,
-            contentBase64: file.buffer.toString('base64')
-          };
+        if (!s3Service.isConfigured()) {
+          throw new Error('S3 storage is not configured. File attachments are disabled.');
         }
+        const url = await s3Service.uploadToS3(file.buffer, file.originalname, file.mimetype || 'application/octet-stream');
+        return {
+          name: file.originalname,
+          mimeType: file.mimetype || 'application/octet-stream',
+          size: file.size || 0,
+          contentBase64: '',
+          url
+        };
       })
     );
 
@@ -183,33 +167,17 @@ exports.updateTemplate = async (req, res) => {
     const uploadedAttachments = req.files || [];
     const newAttachments = await Promise.all(
       uploadedAttachments.map(async (file) => {
-        if (s3Service.isConfigured()) {
-          try {
-            const url = await s3Service.uploadToS3(file.buffer, file.originalname, file.mimetype || 'application/octet-stream');
-            return {
-              name: file.originalname,
-              mimeType: file.mimetype || 'application/octet-stream',
-              size: file.size || 0,
-              contentBase64: '',
-              url
-            };
-          } catch (s3Error) {
-            logger.error({ err: s3Error }, 'Failed to upload template attachment to S3, falling back to Base64');
-            return {
-              name: file.originalname,
-              mimeType: file.mimetype || 'application/octet-stream',
-              size: file.size || 0,
-              contentBase64: file.buffer.toString('base64')
-            };
-          }
-        } else {
-          return {
-            name: file.originalname,
-            mimeType: file.mimetype || 'application/octet-stream',
-            size: file.size || 0,
-            contentBase64: file.buffer.toString('base64')
-          };
+        if (!s3Service.isConfigured()) {
+          throw new Error('S3 storage is not configured. File attachments are disabled.');
         }
+        const url = await s3Service.uploadToS3(file.buffer, file.originalname, file.mimetype || 'application/octet-stream');
+        return {
+          name: file.originalname,
+          mimeType: file.mimetype || 'application/octet-stream',
+          size: file.size || 0,
+          contentBase64: '',
+          url
+        };
       })
     );
 

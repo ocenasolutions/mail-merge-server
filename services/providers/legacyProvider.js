@@ -11,13 +11,16 @@ const send = async ({ emailConfig, recipient, subject, htmlBody, textBody, attac
         to: [{ email: recipient }],
         subject,
         textContent: textBody,
-        htmlContent: htmlBody,
-        attachment: attachments.map((attachment) => ({
+        htmlContent: htmlBody
+      };
+
+      if (attachments && attachments.length > 0) {
+        payload.attachment = attachments.map((attachment) => ({
           name: attachment.filename,
           content: Buffer.from(attachment.content).toString('base64'),
           contentId: attachment.cid
-        }))
-      };
+        }));
+      }
 
       const response = await axios.post('https://api.brevo.com/v3/smtp/email', payload, {
         headers: {

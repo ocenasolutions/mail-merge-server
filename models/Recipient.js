@@ -41,6 +41,17 @@ const recipientSchema = new mongoose.Schema({
   sentAt: Date,
   sentSubject: String,
   providerMessageId: String,
+  sentBy: String,
+  isFallbackUsed: {
+    type: Boolean,
+    default: false
+  },
+  followUpStatus: {
+    type: String,
+    enum: ['none', 'sent'],
+    default: 'none'
+  },
+  followUpSentAt: Date,
   replyCount: {
     type: Number,
     default: 0

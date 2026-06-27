@@ -575,14 +575,55 @@ class CampaignPipelineService {
 
       const sendStartedAt = Date.now();
 
-      const result = await sendCampaignEmail({
+      let result = await sendCampaignEmail({
         campaign: refreshCampaign,
         recipient,
         user,
         emailConfig,
         preResolvedAttachments
       });
-      const latencyMs = Date.now() - sendStartedAt;
+      let latencyMs = Date.now() - sendStartedAt;
+
+      let fallbackUsed = false;
+      let activeEmailConfig = emailConfig;
+
+      const isFallbackEnabled = user?.settings?.fallbackEnabled;
+      const fallbackEmailConfigId = user?.settings?.fallbackEmailConfigId;
+
+      if (!result.success && isFallbackEnabled && fallbackEmailConfigId) {
+        try {
+          const fallbackConfig = await EmailConfig.findOne({
+            _id: fallbackEmailConfigId,
+            userId: user._id,
+            verified: true
+          });
+
+          if (fallbackConfig) {
+            logger.info({
+              campaignId: String(refreshCampaign._id),
+              recipientId: String(recipient._id),
+              primaryEmail: emailConfig.email || emailConfig.config?.email,
+              fallbackEmail: fallbackConfig.email || fallbackConfig.config?.email
+            }, 'Primary sending failed. Retrying with fallback configuration');
+
+            const fallbackSendStartedAt = Date.now();
+            const fallbackResult = await sendCampaignEmail({
+              campaign: refreshCampaign,
+              recipient,
+              user,
+              emailConfig: fallbackConfig,
+              preResolvedAttachments
+            });
+
+            result = fallbackResult;
+            latencyMs = Date.now() - fallbackSendStartedAt;
+            fallbackUsed = true;
+            activeEmailConfig = fallbackConfig;
+          }
+        } catch (fallbackErr) {
+          logger.error({ err: fallbackErr, campaignId: String(refreshCampaign._id) }, 'Failed sending via fallback config');
+        }
+      }
 
       const latestState = await Campaign.findById(refreshCampaign._id).select('status queue.throttledUntil').lean();
       const campaignPausedAfterClaim = latestState?.status === 'paused';
@@ -591,19 +632,22 @@ class CampaignPipelineService {
         logger.info({
           campaignId: String(refreshCampaign._id),
           recipientId: String(recipient._id),
-          provider: emailConfig.provider,
+          provider: activeEmailConfig.provider,
           attempt: job.attemptCount,
           latencyMs,
           status: 'sent',
-          errorCode: null
+          errorCode: null,
+          fallbackUsed
         }, 'Campaign email sent');
         metrics.incrementCounter('campaign_pipeline.sent');
         await markJobSent({
           job,
           recipient,
-          provider: emailConfig.provider,
+          provider: activeEmailConfig.provider,
           providerMessageId: result.providerMessageId,
-          subject: result.subject
+          subject: result.subject,
+          sentBy: activeEmailConfig.email || activeEmailConfig.config?.email || '',
+          isFallbackUsed: fallbackUsed
         });
         broadcastProgress(refreshCampaign._id, 'campaign.sent').catch(() => null);
         return;
@@ -620,7 +664,7 @@ class CampaignPipelineService {
         logger.warn({
           campaignId: String(refreshCampaign._id),
           recipientId: String(recipient._id),
-          provider: emailConfig.provider,
+          provider: activeEmailConfig.provider,
           attempt: job.attemptCount,
           latencyMs,
           status: 'retrying',
@@ -639,7 +683,7 @@ class CampaignPipelineService {
             details: result.providerError || null
           },
           retryAfterMs: retryDecision.retryAfterMs,
-          provider: emailConfig.provider,
+          provider: activeEmailConfig.provider,
           providerMessageId: result.providerMessageId || null
         });
         broadcastProgress(refreshCampaign._id, 'campaign.retrying').catch(() => null);
@@ -650,7 +694,7 @@ class CampaignPipelineService {
       logger.error({
         campaignId: String(refreshCampaign._id),
         recipientId: String(recipient._id),
-        provider: emailConfig.provider,
+        provider: activeEmailConfig.provider,
         attempt: job.attemptCount,
         latencyMs,
         status: 'failed',
@@ -659,7 +703,7 @@ class CampaignPipelineService {
       await markJobDeadLetter({
         job,
         recipient,
-        provider: emailConfig.provider,
+        provider: activeEmailConfig.provider,
         error: {
           message: result.error || 'Permanent delivery failure',
           statusCode: retryDecision.statusCode || result.statusCode || null,

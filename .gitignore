@@ -8,3 +8,5 @@ logs/
 
 # Diagnostic scripts (not needed in production)
 scripts/
+
+test.js

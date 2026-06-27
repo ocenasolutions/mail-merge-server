@@ -118,6 +118,46 @@ exports.getCampaignStats = async (req, res) => {
     const tracking = await Tracking.find({ campaignId: campaign._id });
     const repliedRecipients = recipients.filter((recipient) => (recipient.replyCount || 0) > 0);
 
+    const trackingMap = new Map(tracking.map((t) => [String(t.recipientId), t]));
+
+    let primarySentCount = 0;
+    let fallbackSentCount = 0;
+    let successfulDeliveries = 0;
+    let failedDeliveries = 0;
+    let followUpsPending = 0;
+    let openedCount = 0;
+
+    recipients.forEach((r) => {
+      const isSent = r.status === 'sent';
+      const isFailed = ['failed', 'bounced'].includes(r.status);
+      const track = trackingMap.get(String(r._id));
+      const hasOpened = (track?.openCount || 0) > 0;
+      const hasReplied = (r.replyCount || 0) > 0;
+
+      if (isSent) {
+        successfulDeliveries++;
+        if (r.isFallbackUsed) {
+          fallbackSentCount++;
+        } else {
+          primarySentCount++;
+        }
+      }
+      if (isFailed) {
+        failedDeliveries++;
+      }
+      if (hasOpened) {
+        openedCount++;
+      }
+      if (isSent && hasOpened && !hasReplied && r.followUpStatus !== 'sent') {
+        followUpsPending++;
+      }
+    });
+
+    const totalTargeted = recipients.length;
+    const deliveryRate = totalTargeted > 0 ? Number(((successfulDeliveries / totalTargeted) * 100).toFixed(2)) : 0;
+    const openRate = successfulDeliveries > 0 ? Number(((openedCount / successfulDeliveries) * 100).toFixed(2)) : 0;
+    const replyRate = successfulDeliveries > 0 ? Number(((repliedRecipients.length / successfulDeliveries) * 100).toFixed(2)) : 0;
+
     res.json({
       success: true,
       data: {
@@ -131,12 +171,24 @@ exports.getCampaignStats = async (req, res) => {
           campaign.stats.bounced || 0,
           repliedRecipients.length
         ),
+        summaryMetrics: {
+          totalTargeted,
+          emailsSent: campaign.stats.sent || (successfulDeliveries + failedDeliveries),
+          successfulDeliveries,
+          failedDeliveries,
+          deliveryRate,
+          openRate,
+          replyRate,
+          followUpsPending,
+          primarySentCount,
+          fallbackSentCount
+        },
         recentOpens: tracking
-          .flatMap((item) => item.opens)
+          .flatMap((item) => item.opens || [])
           .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
           .slice(0, 10),
         recentClicks: tracking
-          .flatMap((item) => item.clicks.map((click) => ({
+          .flatMap((item) => (item.clicks || []).map((click) => ({
             ...click,
             recipientId: item.recipientId,
             campaignId: item.campaignId

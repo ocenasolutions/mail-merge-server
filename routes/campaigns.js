@@ -32,5 +32,6 @@ router.post('/:id/dlq/:deadLetterId/requeue', campaignController.requeueDeadLett
 router.post('/:id/update-sheet', campaignController.updateSheet);
 router.post('/test-email', campaignController.testEmail);
 router.get('/:id/recipients', campaignController.getRecipients);
+router.post('/:id/recipients/:recipientId/follow-up', campaignController.sendFollowUp);
 
 module.exports = router;

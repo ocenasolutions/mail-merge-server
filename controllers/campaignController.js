@@ -278,33 +278,17 @@ exports.createCampaign = async (req, res) => {
     const uploadedAttachments = Array.isArray(req.files) ? req.files : [];
     const processedUploadedAttachments = await Promise.all(
       uploadedAttachments.map(async (file) => {
-        if (s3Service.isConfigured()) {
-          try {
-            const url = await s3Service.uploadToS3(file.buffer, file.originalname, file.mimetype || 'application/octet-stream');
-            return {
-              name: file.originalname,
-              mimeType: file.mimetype || 'application/octet-stream',
-              size: file.size || 0,
-              contentBase64: '',
-              url
-            };
-          } catch (s3Error) {
-            logger.error({ err: s3Error }, 'Failed to upload attachment to S3, falling back to Base64');
-            return {
-              name: file.originalname,
-              mimeType: file.mimetype || 'application/octet-stream',
-              size: file.size || 0,
-              contentBase64: file.buffer.toString('base64')
-            };
-          }
-        } else {
-          return {
-            name: file.originalname,
-            mimeType: file.mimetype || 'application/octet-stream',
-            size: file.size || 0,
-            contentBase64: file.buffer.toString('base64')
-          };
+        if (!s3Service.isConfigured()) {
+          throw new Error('S3 storage is not configured. File attachments are disabled.');
         }
+        const url = await s3Service.uploadToS3(file.buffer, file.originalname, file.mimetype || 'application/octet-stream');
+        return {
+          name: file.originalname,
+          mimeType: file.mimetype || 'application/octet-stream',
+          size: file.size || 0,
+          contentBase64: '',
+          url
+        };
       })
     );
 
@@ -1031,6 +1015,119 @@ exports.requeueDeadLetter = async (req, res) => {
     });
 
     res.json({ success: true, data: deadLetter });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.sendFollowUp = async (req, res) => {
+  try {
+    const { id, recipientId } = req.params;
+
+    const campaign = await Campaign.findOne({ _id: id, userId: req.user._id });
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
+    }
+
+    const recipient = await Recipient.findOne({ _id: recipientId, campaignId: campaign._id });
+    if (!recipient) {
+      return res.status(404).json({ success: false, message: 'Recipient not found' });
+    }
+
+    const emailConfig = await EmailConfig.findOne({ _id: campaign.emailConfigId, userId: req.user._id }) 
+      || await EmailConfig.findOne({ userId: req.user._id, verified: true });
+
+    if (!emailConfig) {
+      return res.status(400).json({ success: false, message: 'No verified email sender account found' });
+    }
+
+    let subject = `Re: ${recipient.sentSubject || campaign.subject}`;
+    let body = `<p>Hi ${recipient.mergeData?.get('name') || recipient.mergeData?.get('Name') || 'there'},</p>
+<p>I wanted to quickly follow up on my last email. I know you're busy, but I'd love to hear your thoughts when you have a moment.</p>
+<p>Best regards,</p>`;
+
+    if (process.env.GROQ_API_KEY) {
+      try {
+        const axios = require('axios');
+        const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+        const stopToken = '###END###';
+        const responseShape = '{"subject":"...","body":"..."}';
+        const recipientName = recipient.mergeData?.get('name') || recipient.mergeData?.get('Name') || 'there';
+        const recipientCompany = recipient.mergeData?.get('company') || recipient.mergeData?.get('Company') || '';
+
+        const systemPrompt = `You write a friendly follow-up email to a recipient who opened our initial email but has not replied yet.
+Return a JSON object only.
+The JSON must match exactly this shape: ${responseShape}.
+Never include markdown fences, explanations, notes, or commentary.
+Keep the draft concise, polished, and natural.
+Use recipient details: Name: ${recipientName}, Company: ${recipientCompany}.
+The initial email subject was: "${recipient.sentSubject || campaign.subject}".
+Make the subject line start with "Re: " or be relevant to the original.
+End the response with ${stopToken}`;
+
+        const userPrompt = `Write a short follow-up email to ${recipientName} at ${recipientCompany}. The original subject was "${recipient.sentSubject || campaign.subject}". Keep it clean and short, requesting a quick reply. Return only JSON then append ${stopToken}.`;
+
+        const response = await axios.post(
+          'https://api.groq.com/openai/v1/chat/completions',
+          {
+            model,
+            temperature: 0.5,
+            max_completion_tokens: 500,
+            stop: [stopToken],
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt }
+            ]
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: 8000
+          }
+        );
+
+        const rawContent = response.data?.choices?.[0]?.message?.content?.trim();
+        if (rawContent) {
+          const cleanedContent = rawContent
+            .replace(stopToken, '')
+            .replace(/^```json\s*/i, '')
+            .replace(/^```\s*/i, '')
+            .replace(/\s*```$/i, '')
+            .trim();
+          
+          const parsed = JSON.parse(cleanedContent);
+          if (parsed.subject) subject = parsed.subject;
+          if (parsed.body) body = parsed.body;
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed generating AI follow-up; falling back to template');
+      }
+    }
+
+    const result = await sendEmail(
+      emailConfig,
+      req.user,
+      recipient.email,
+      subject,
+      body,
+      recipient.trackingId,
+      {
+        trackingEnabled: campaign.trackingEnabled !== false,
+        attachments: campaign.attachments || []
+      }
+    );
+
+    if (!result.success) {
+      return res.status(500).json({ success: false, message: result.error || 'Failed to send follow-up email' });
+    }
+
+    recipient.followUpStatus = 'sent';
+    recipient.followUpSentAt = new Date();
+    await recipient.save();
+
+    res.json({ success: true, message: 'Follow-up sent successfully', data: recipient });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

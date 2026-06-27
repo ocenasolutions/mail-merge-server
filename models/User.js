@@ -32,6 +32,15 @@ const userSchema = new mongoose.Schema({
       type: Number,
       default: 1
     },
+    fallbackEnabled: {
+      type: Boolean,
+      default: false
+    },
+    fallbackEmailConfigId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'EmailConfig',
+      default: null
+    },
     notifications: {
       replyNotificationsEnabled: {
         type: Boolean,

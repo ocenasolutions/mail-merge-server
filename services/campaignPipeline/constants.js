@@ -19,7 +19,7 @@ const JOB_STATUSES = {
 
 const DEFAULT_BATCH_SIZE = 25;
 const DEFAULT_WORKER_COUNT = 4;
-const MIN_WORKERS = 3;
+const MIN_WORKERS = 1;
 const MAX_WORKERS = 5;
 const DEFAULT_LEASE_MS = 2 * 60 * 1000;
 const DEFAULT_MAX_ATTEMPTS = 8;

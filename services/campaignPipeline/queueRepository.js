@@ -268,7 +268,7 @@ const updateRecipientStatus = async (recipientId, updates) => Recipient.updateOn
   { $set: updates }
 );
 
-const markJobSent = async ({ job, recipient, provider, providerMessageId, subject, now = new Date(), skipCampaignIncrement = false }) => {
+const markJobSent = async ({ job, recipient, provider, providerMessageId, subject, now = new Date(), skipCampaignIncrement = false, sentBy = null, isFallbackUsed = false }) => {
   await CampaignDispatchJob.updateOne(
     { _id: job._id },
     {
@@ -296,7 +296,9 @@ const markJobSent = async ({ job, recipient, provider, providerMessageId, subjec
     deliveryJobId: null,
     lockedBy: null,
     lockedAt: null,
-    leaseExpiresAt: null
+    leaseExpiresAt: null,
+    sentBy,
+    isFallbackUsed
   });
 
   if (!skipCampaignIncrement) {
