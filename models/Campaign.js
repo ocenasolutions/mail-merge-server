@@ -109,5 +109,6 @@ const campaignSchema = new mongoose.Schema({
 });
 
 campaignSchema.index({ userId: 1, status: 1 });
+campaignSchema.index({ userId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Campaign', campaignSchema);

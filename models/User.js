@@ -17,6 +17,10 @@ const userSchema = new mongoose.Schema({
     required: true
   },
   avatar: String,
+  reuploadNotificationPending: {
+    type: Boolean,
+    default: false
+  },
   googleAccessToken: String,
   googleRefreshToken: {
     type: String,

@@ -32,26 +32,41 @@ startedTasks.push(
   })
 );
 
-// Sync replies and campaign stats for all active users every 15 minutes.
+// Sync replies and campaign stats every 15 minutes — one user at a time via cursor.
+let syncInProgress = false;
+
 startedTasks.push(
   cron.schedule('*/15 * * * *', async () => {
-    try {
-      logger.info('Running scheduled background campaign stats & replies sync');
-      const users = await User.find({});
-      for (const user of users) {
-        await syncUserReplyStats(user._id).catch((err) => logger.warn({
-          err,
-          userId: user._id
-        }, 'Error syncing replies'));
+    if (syncInProgress) {
+      logger.warn('Background sync already in progress — skipping this tick');
+      return;
+    }
 
-        await syncAllCampaignStatsForUser(user._id).catch((err) => logger.warn({
-          err,
-          userId: user._id
-        }, 'Error syncing campaign stats'));
+    syncInProgress = true;
+    logger.info('Running scheduled background campaign stats & replies sync');
+
+    try {
+      // Use a cursor so we never hold all users in memory at once.
+      const cursor = User.find({}).select('_id').lean().cursor();
+
+      for await (const user of cursor) {
+        await syncUserReplyStats(user._id).catch((err) =>
+          logger.warn({ err, userId: user._id }, 'Error syncing replies')
+        );
+
+        await syncAllCampaignStatsForUser(user._id).catch((err) =>
+          logger.warn({ err, userId: user._id }, 'Error syncing campaign stats')
+        );
+
+        // Yield to the event loop between users so GC can breathe.
+        await new Promise((resolve) => setImmediate(resolve));
       }
+
       logger.info('Background stats & replies sync completed');
     } catch (error) {
       logger.error({ err: error }, 'Background stats sync scheduler error');
+    } finally {
+      syncInProgress = false;
     }
   })
 );

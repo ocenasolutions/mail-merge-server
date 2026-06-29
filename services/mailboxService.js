@@ -4,6 +4,10 @@ const { simpleParser } = require('mailparser');
 const logger = require('../utils/logger');
 const User = require('../models/User');
 
+const authFailureCount = new Map(); // email -> count
+const AUTH_FAILURE_THRESHOLD = 3;
+const activeConnections = new Set();
+
 const MAILBOX_PROVIDERS = new Set(['gmail', 'godaddy', 'hostinger', 'smtp', 'outlook', 'titan']);
 
 const supportsMailbox = (emailConfig) => MAILBOX_PROVIDERS.has(emailConfig?.provider);
@@ -127,14 +131,37 @@ const createMailboxClient = async (emailConfig, user) => {
     port,
     secure,
     auth,
-    logger: false,
-    connectionTimeout: 15000,
-    socketTimeout: 20000
+    tls: { rejectUnauthorized: false },
+    socketTimeout: 10000,    // fail fast instead of waiting 20s
+    connectionTimeout: 8000, // fail fast instead of waiting 15s
+    logger: false
   });
 
   attachMailboxErrorHandler(client, emailConfig);
 
-  await client.connect();
+  const accountKey = mailboxEmail.toLowerCase();
+  if ((authFailureCount.get(accountKey) || 0) >= AUTH_FAILURE_THRESHOLD) {
+    logger.warn({ email: accountKey }, `Skipping connection to ${accountKey} — repeated auth failures`);
+    throw new Error(`Skipping ${accountKey} — repeated auth failures`);
+  }
+
+  try {
+    await client.connect();
+    activeConnections.add(client);
+    client.on('close', () => {
+      activeConnections.delete(client);
+    });
+    authFailureCount.delete(accountKey); // reset on success
+  } catch (err) {
+    if (err.authenticationFailed || (err.message && err.message.includes('AUTHENTICATIONFAILED'))) {
+      const nextCount = (authFailureCount.get(accountKey) || 0) + 1;
+      authFailureCount.set(accountKey, nextCount);
+      if (nextCount >= AUTH_FAILURE_THRESHOLD) {
+        setTimeout(() => authFailureCount.delete(accountKey), 60 * 60 * 1000).unref();
+      }
+    }
+    throw err;
+  }
   return client;
 };
 
@@ -325,5 +352,6 @@ module.exports = {
   listMailboxes,
   listMessages,
   getMessageDetail,
-  appendSentMessage
+  appendSentMessage,
+  getActiveConnectionsCount: () => activeConnections.size
 };

@@ -78,9 +78,6 @@ const resolveCampaignEmailConfig = async (userId) => {
 
 exports.getCampaigns = async (req, res) => {
   try {
-    await syncAllCampaignStatsForUser(req.user._id).catch(() => null);
-    await syncUserReplyStats(req.user._id).catch(() => null);
-
     const campaigns = await Campaign.find({ userId: req.user._id })
       .populate('emailConfigId', 'name provider email config.email')
       .sort('-createdAt');
@@ -266,7 +263,7 @@ exports.createCampaign = async (req, res) => {
           name: att.name,
           mimeType: att.mimeType || 'application/octet-stream',
           size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
-          contentBase64: att.contentBase64,
+          contentBase64: '',
           url: att.url
         }));
       } catch (err) {
@@ -393,7 +390,7 @@ exports.updateCampaign = async (req, res) => {
         name: att.name,
         mimeType: att.mimeType || 'application/octet-stream',
         size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
-        contentBase64: att.contentBase64,
+        contentBase64: '',
         url: att.url
       }));
     }

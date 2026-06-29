@@ -219,7 +219,7 @@ const processCampaign = async (campaignId) => {
         }, '⏸️ Rate limit hit, scheduling retry');
         
         await campaign.save();
-        setTimeout(() => processCampaign(campaignId), rateLimitError.msBeforeNext);
+        setTimeout(() => processCampaign(campaignId), Math.max(1, rateLimitError.msBeforeNext));
         return;
       }
     }

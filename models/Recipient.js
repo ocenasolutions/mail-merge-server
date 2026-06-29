@@ -78,5 +78,7 @@ recipientSchema.index({ campaignId: 1, email: 1 }, { unique: true });
 recipientSchema.index({ trackingId: 1 }, { unique: true, sparse: true });
 recipientSchema.index({ campaignId: 1, status: 1, nextAttemptAt: 1 });
 recipientSchema.index({ campaignId: 1, leaseExpiresAt: 1 });
+recipientSchema.index({ campaignId: 1, status: 1 });
+recipientSchema.index({ campaignId: 1, sentAt: 1 });
 
 module.exports = mongoose.model('Recipient', recipientSchema);

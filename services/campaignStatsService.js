@@ -3,29 +3,48 @@ const Recipient = require('../models/Recipient');
 const Tracking = require('../models/Tracking');
 
 const buildStatsFromRecipients = async (campaignId) => {
-  const [recipients, trackingDocs] = await Promise.all([
-    Recipient.find({ campaignId }).select('status replyCount error'),
-    Tracking.find({ campaignId }).select('openCount clickCount')
+  // Use aggregation instead of loading all recipients into memory.
+  const [recipientStats, trackingStats] = await Promise.all([
+    Recipient.aggregate([
+      { $match: { campaignId } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          sent: { $sum: { $cond: [{ $eq: ['$status', 'sent'] }, 1, 0] } },
+          failed: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+          bounced: { $sum: { $cond: [{ $eq: ['$status', 'bounced'] }, 1, 0] } },
+          pending: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
+          replied: {
+            $sum: { $cond: [{ $gt: [{ $ifNull: ['$replyCount', 0] }, 0] }, 1, 0] }
+          }
+        }
+      }
+    ]),
+    Tracking.aggregate([
+      { $match: { campaignId } },
+      {
+        $group: {
+          _id: null,
+          opened: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$openCount', 0] }, 0] }, 1, 0] } },
+          clicked: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$clickCount', 0] }, 0] }, 1, 0] } }
+        }
+      }
+    ])
   ]);
 
-  const total = recipients.length;
-  const sent = recipients.filter((recipient) => recipient.status === 'sent').length;
-  const failed = recipients.filter((recipient) => recipient.status === 'failed').length;
-  const bounced = recipients.filter((recipient) => recipient.status === 'bounced').length;
-  const replied = recipients.filter((recipient) => (recipient.replyCount || 0) > 0).length;
-  const opened = trackingDocs.filter((doc) => (doc.openCount || 0) > 0).length;
-  const clicked = trackingDocs.filter((doc) => (doc.clickCount || 0) > 0).length;
-  const pending = recipients.filter((recipient) => recipient.status === 'pending').length;
+  const r = recipientStats[0] || { total: 0, sent: 0, failed: 0, bounced: 0, pending: 0, replied: 0 };
+  const t = trackingStats[0] || { opened: 0, clicked: 0 };
 
   return {
-    total,
-    sent,
-    failed,
-    bounced,
-    opened,
-    clicked,
-    replied,
-    pending
+    total: r.total,
+    sent: r.sent,
+    failed: r.failed,
+    bounced: r.bounced,
+    opened: t.opened,
+    clicked: t.clicked,
+    replied: r.replied,
+    pending: r.pending
   };
 };
 
@@ -67,9 +86,18 @@ const syncCampaignStats = async (campaignOrId) => {
 };
 
 const syncAllCampaignStatsForUser = async (userId) => {
-  const campaigns = await Campaign.find({ userId });
-  const updated = [];
+  // Only sync campaigns that can still change — skip old completed ones
+  // unless they were completed in the last 7 days.
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const campaigns = await Campaign.find({
+    userId,
+    $or: [
+      { status: { $in: ['sending', 'paused', 'scheduled'] } },
+      { status: 'completed', completedAt: { $gte: sevenDaysAgo } }
+    ]
+  });
 
+  const updated = [];
   for (const campaign of campaigns) {
     updated.push(await syncCampaignStats(campaign));
   }

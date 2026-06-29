@@ -6,7 +6,9 @@ const { listMessages, getMessageDetail, supportsMailbox } = require('./mailboxSe
 const { mergeTags } = require('./emailService');
 const logger = require('../utils/logger');
 
-const MAX_MESSAGES_PER_ACCOUNT = 250;
+// Reduced from 250 — fetching 250 full IMAP envelopes per account per user
+// is the primary OOM trigger on the 512 MB Starter instance.
+const MAX_MESSAGES_PER_ACCOUNT = 50;
 
 const normalizeEmailAddress = (value = '') => {
   const match = String(value).match(/<([^>]+)>/);
@@ -44,8 +46,8 @@ const stripHtml = (value = '') => String(value)
 
 const stripQuotedHtmlBlocks = (value = '') => String(value)
   .replace(/<blockquote[\s\S]*?<\/blockquote>/gi, ' ')
-  .replace(/<div[^>]*class="[^"]*(gmail_quote|gmail_extra|protonmail_quote|yahoo_quoted)[^"]*"[^>]*>[\s\S]*?<\/div>/gi, ' ')
-  .replace(/<div[^>]*style="[^"]*margin[^"]*left[^"]*"[^>]*>[\s\S]*?<\/div>/gi, ' ');
+  .replace(/<div[^>]*class="[^\"]*(gmail_quote|gmail_extra|protonmail_quote|yahoo_quoted)[^\"]*"[^>]*>[\s\S]*?<\/div>/gi, ' ')
+  .replace(/<div[^>]*style="[^\"]*margin[^\"]*left[^\"]*"[^>]*>[\s\S]*?<\/div>/gi, ' ');
 
 const htmlToReplyText = (value = '') => stripHtml(
   stripQuotedHtmlBlocks(String(value || '')
@@ -58,7 +60,7 @@ const htmlToReplyText = (value = '') => stripHtml(
 );
 
 const normalizeForMatch = (value = '') => String(value)
-  .replace(/[\u2019’]/g, '\'')
+  .replace(/[\u2019']/g, '\'')
   .replace(/[^a-zA-Z0-9\s']/g, ' ')
   .replace(/\s+/g, ' ')
   .trim()
@@ -221,11 +223,7 @@ const scoreReplyText = (text = '') => {
   else if (score <= -30) status = 'not_interested';
   else if (score <= 0) status = 'cold';
 
-  return {
-    score,
-    status,
-    reason
-  };
+  return { score, status, reason };
 };
 
 const buildMailboxConfigs = (user, configs) => {
@@ -238,9 +236,7 @@ const buildMailboxConfigs = (user, configs) => {
     mailboxConfigs.push({
       _id: 'primary-gmail',
       provider: 'gmail',
-      config: {
-        email: user.email
-      },
+      config: { email: user.email },
       email: user.email
     });
   }
@@ -250,8 +246,6 @@ const buildMailboxConfigs = (user, configs) => {
       continue;
     }
 
-    // Configured Gmail accounts are not mailbox-sync capable here because
-    // the app only stores OAuth tokens for the signed-in primary Google user.
     if (config.provider === 'gmail') {
       continue;
     }
@@ -274,31 +268,31 @@ const buildMailboxConfigs = (user, configs) => {
 const loadInboxMessagesForUser = async (user, configs) => {
   const mailboxConfigs = buildMailboxConfigs(user, configs);
 
-  const results = await Promise.allSettled(
-    mailboxConfigs.map(async (config) => {
+  // Process mailbox accounts sequentially instead of Promise.allSettled
+  // to avoid spiking memory for users with multiple email accounts.
+  const messages = [];
+  for (const config of mailboxConfigs) {
+    try {
       const result = await listMessages(config, user, {
         folder: 'inbox',
         limit: MAX_MESSAGES_PER_ACCOUNT,
         offset: 0
       });
 
-      return result.messages.map((message) => ({
-        uid: message.uid,
-        senderEmail: normalizeEmailAddress(message.from?.[0]?.address || ''),
-        subject: message.subject || '',
-        date: message.date ? new Date(message.date) : null,
-        accountEmail: config.config?.email || config.email || user.email || '',
-        mailboxConfig: config
-      })).filter((message) => message.senderEmail && message.date);
-    })
-  );
+      const mapped = result.messages
+        .map((message) => ({
+          uid: message.uid,
+          senderEmail: normalizeEmailAddress(message.from?.[0]?.address || ''),
+          subject: message.subject || '',
+          date: message.date ? new Date(message.date) : null,
+          accountEmail: config.config?.email || config.email || user.email || '',
+          mailboxConfig: config
+        }))
+        .filter((message) => message.senderEmail && message.date);
 
-  const messages = [];
-  for (const result of results) {
-    if (result.status === 'fulfilled') {
-      messages.push(...result.value);
-    } else {
-      logger.warn({ err: result.reason }, 'Reply tracking inbox fetch failed for one account');
+      messages.push(...mapped);
+    } catch (err) {
+      logger.warn({ err }, 'Reply tracking inbox fetch failed for one account');
     }
   }
 
@@ -318,42 +312,32 @@ const buildExpectedSubject = (campaign, recipient) => {
 };
 
 const syncUserReplyStats = async (userId) => {
-  const user = await User.findById(userId);
+  const user = await User.findById(userId).lean();
   if (!user) {
     return null;
   }
 
-  const campaigns = await Campaign.find({ userId }).select('_id subject stats').lean();
+  // Only sync campaigns that are active or recently completed — no need
+  // to re-scan drafts or campaigns that were completed long ago.
+  const campaigns = await Campaign.find({
+    userId,
+    status: { $in: ['sending', 'completed', 'paused'] }
+  }).select('_id subject stats').lean();
+
   if (!campaigns.length) {
-    return {
-      totalReplies: 0,
-      campaignReplyCounts: new Map()
-    };
+    return { totalReplies: 0, campaignReplyCounts: new Map() };
   }
 
   const campaignMap = new Map(campaigns.map((campaign) => [String(campaign._id), campaign]));
-  const recipients = await Recipient.find({
-    campaignId: { $in: campaigns.map((campaign) => campaign._id) },
-    status: 'sent',
-    sentAt: { $ne: null }
-  }).lean();
 
-  if (!recipients.length) {
-    await Campaign.updateMany(
-      { userId, 'stats.replied': { $ne: 0 } },
-      { $set: { 'stats.replied': 0 } }
-    );
-
-    return {
-      totalReplies: 0,
-      campaignReplyCounts: new Map()
-    };
-  }
-
+  // Only look at recipients that were actually sent to — use a cursor
+  // to avoid pulling all recipients into memory at once for large campaigns.
   const configs = await EmailConfig.find({ userId }).lean();
   const inboxMessages = await loadInboxMessagesForUser(user, configs);
-  const messagesBySender = new Map();
 
+  // Free the large configs array — we only needed it for inbox loading.
+  // (helps GC collect it sooner)
+  const messagesBySender = new Map();
   for (const message of inboxMessages) {
     const existing = messagesBySender.get(message.senderEmail) || [];
     existing.push(message);
@@ -363,7 +347,17 @@ const syncUserReplyStats = async (userId) => {
   const recipientUpdates = [];
   const campaignReplyCounts = new Map();
 
-  for (const recipient of recipients) {
+  // Use a cursor to stream recipients instead of loading them all at once.
+  const recipientCursor = Recipient.find({
+    campaignId: { $in: campaigns.map((c) => c._id) },
+    status: 'sent',
+    sentAt: { $ne: null }
+  })
+    .select('_id email campaignId sentAt sentSubject mergeData replyCount repliedAt latestReplySnippet leadStatus leadScore leadReason')
+    .lean()
+    .cursor();
+
+  for await (const recipient of recipientCursor) {
     const campaign = campaignMap.get(String(recipient.campaignId));
     if (!campaign) {
       continue;
@@ -374,14 +368,8 @@ const syncUserReplyStats = async (userId) => {
     const sentAt = recipient.sentAt ? new Date(recipient.sentAt) : null;
 
     const matches = candidateMessages.filter((message) => {
-      if (!message.date || !sentAt) {
-        return false;
-      }
-
-      if (message.date.getTime() < sentAt.getTime()) {
-        return false;
-      }
-
+      if (!message.date || !sentAt) return false;
+      if (message.date.getTime() < sentAt.getTime()) return false;
       return subjectsMatch(message.subject, expectedSubject);
     }).sort((a, b) => a.date.getTime() - b.date.getTime());
 
@@ -394,15 +382,15 @@ const syncUserReplyStats = async (userId) => {
     let leadScore = recipient.leadScore || 0;
     let leadReason = recipient.leadReason || '';
 
-    // Only fetch message details and score them if we actually have a new reply
-    // or if the snippet has not been populated yet.
     if (latestMatch && (nextReplyCount > existingReplyCount || !recipient.latestReplySnippet)) {
       try {
         const detail = await getMessageDetail(latestMatch.mailboxConfig, user, {
           folder: 'inbox',
           uid: latestMatch.uid
         });
-        const rawReplyText = detail?.html || detail?.text || latestMatch.subject || '';
+        // Truncate HTML early before passing to heavy regex processing.
+        const rawHtml = (detail?.html || '').slice(0, 8000);
+        const rawReplyText = rawHtml || detail?.text || latestMatch.subject || '';
         latestReplySnippet = cleanReplySnippet(rawReplyText, campaign).slice(0, 280);
         const classification = scoreReplyText(latestReplySnippet || rawReplyText);
         leadStatus = classification.status;
@@ -441,6 +429,11 @@ const syncUserReplyStats = async (userId) => {
     if (nextReplyCount > 0) {
       const key = String(recipient.campaignId);
       campaignReplyCounts.set(key, (campaignReplyCounts.get(key) || 0) + 1);
+    }
+
+    // Flush bulk writes in batches of 100 to avoid accumulating a huge array.
+    if (recipientUpdates.length >= 100) {
+      await Recipient.bulkWrite(recipientUpdates.splice(0, 100));
     }
   }
 

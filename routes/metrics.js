@@ -7,5 +7,6 @@ router.use(protect);
 
 router.get('/campaign-pipeline', systemController.getPipelineMetrics);
 router.get('/health', systemController.getHealth);
+router.get('/system', systemController.getSystemMetrics);
 
 module.exports = router;

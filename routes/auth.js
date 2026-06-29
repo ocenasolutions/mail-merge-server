@@ -187,9 +187,16 @@ router.get('/google/callback',
 // @route   GET /api/auth/me
 // @desc    Get current user
 router.get('/me', protect, async (req, res) => {
+  const pendingNotification = req.user.reuploadNotificationPending;
+  if (pendingNotification) {
+    req.user.reuploadNotificationPending = false;
+    await req.user.save();
+  }
+  const responseData = req.user.toObject();
+  responseData.reuploadNotificationPending = pendingNotification;
   res.json({
     success: true,
-    data: req.user
+    data: responseData
   });
 });
 

@@ -100,7 +100,7 @@ exports.createTemplate = async (req, res) => {
           name: att.name,
           mimeType: att.mimeType || 'application/octet-stream',
           size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
-          contentBase64: att.contentBase64,
+          contentBase64: '',
           url: att.url
         }));
       } catch (err) {
@@ -154,7 +154,7 @@ exports.updateTemplate = async (req, res) => {
           name: att.name,
           mimeType: att.mimeType || 'application/octet-stream',
           size: typeof att.size === 'number' ? att.size : (att.bytes || parseInt(String(att.size)) || 0),
-          contentBase64: att.contentBase64,
+          contentBase64: '',
           url: att.url
         }));
       } catch (err) {

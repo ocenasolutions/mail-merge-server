@@ -11,8 +11,10 @@ const pinoHttp = require('pino-http');
 const logger = require('./utils/logger');
 const systemController = require('./controllers/systemController');
 const realtimeHub = require('./services/realtime/campaignRealtimeHub');
+const apiTracker = require('./middleware/apiTracker');
 
 const app = express();
+app.use(apiTracker.middleware);
 const jsonBodyLimit = '50mb';
 
 // Pino HTTP logger middleware
