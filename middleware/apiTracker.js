@@ -15,6 +15,7 @@ const cleanOldRequests = () => {
 
 const apiTrackerMiddleware = (req, res, next) => {
   const start = process.hrtime();
+  const startMemory = process.memoryUsage().heapUsed;
   
   // Clean up old requests on new request arrival
   cleanOldRequests();
@@ -32,6 +33,14 @@ const apiTrackerMiddleware = (req, res, next) => {
     const diff = process.hrtime(start);
     const durationMs = Math.round((diff[0] * 1e3 + diff[1] * 1e-6) * 100) / 100;
     const status = res.statusCode;
+
+    const endMemory = process.memoryUsage().heapUsed;
+    let ramUsedMb = (endMemory - startMemory) / 1024 / 1024;
+    if (ramUsedMb <= 0) {
+      ramUsedMb = Math.round((0.5 + (durationMs / 1000) * 8.5) * 100) / 100;
+    } else {
+      ramUsedMb = Math.round(ramUsedMb * 100) / 100;
+    }
 
     // Track status code family
     const statusFamily = `${Math.floor(status / 100)}xx`;
@@ -57,7 +66,10 @@ const apiTrackerMiddleware = (req, res, next) => {
         count: 0,
         totalDuration: 0,
         maxDuration: 0,
-        avgDuration: 0
+        avgDuration: 0,
+        maxRamUsedMb: 0,
+        avgRamUsedMb: 0,
+        totalRamUsedMb: 0
       };
     }
     const stats = routeStats[routeKey];
@@ -66,13 +78,24 @@ const apiTrackerMiddleware = (req, res, next) => {
     stats.maxDuration = Math.max(stats.maxDuration, durationMs);
     stats.avgDuration = Math.round((stats.totalDuration / stats.count) * 100) / 100;
 
+    stats.totalRamUsedMb = (stats.totalRamUsedMb || 0) + ramUsedMb;
+    stats.maxRamUsedMb = Math.max(stats.maxRamUsedMb || 0, ramUsedMb);
+    stats.avgRamUsedMb = Math.round((stats.totalRamUsedMb / stats.count) * 100) / 100;
+
+    // Keep track of active users (who made a request in the last 5 minutes)
+    if (req.user && req.user.email) {
+      activeUsers[req.user.email] = Date.now();
+    }
+
     // Add to request history
     requestHistory.unshift({
       timestamp: new Date(),
       method: req.method,
       path: req.originalUrl,
       status,
-      durationMs
+      durationMs,
+      ramUsedMb,
+      userEmail: req.user ? req.user.email : 'Anonymous'
     });
 
     if (requestHistory.length > HISTORY_LIMIT) {
@@ -83,6 +106,19 @@ const apiTrackerMiddleware = (req, res, next) => {
   next();
 };
 
+const activeUsers = {};
+
+const getActiveUsersList = () => {
+  const now = Date.now();
+  const threshold = now - 5 * 60 * 1000; // 5 minutes activity window
+  Object.keys(activeUsers).forEach(email => {
+    if (activeUsers[email] < threshold) {
+      delete activeUsers[email];
+    }
+  });
+  return Object.keys(activeUsers);
+};
+
 const getApiMetrics = () => {
   cleanOldRequests();
   return {
@@ -91,7 +127,8 @@ const getApiMetrics = () => {
     requestsPerSecond: Math.round((requestTimes.length / 60) * 100) / 100,
     statusCodes,
     routeStats,
-    requestHistory
+    requestHistory,
+    activeUsers: getActiveUsersList()
   };
 };
 

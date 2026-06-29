@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { protect } = require('../middleware/auth');
 const SignatureAsset = require('../models/SignatureAsset');
+const User = require('../models/User');
 const logger = require('../utils/logger');
 
 const upload = multer({
@@ -300,6 +301,49 @@ router.post('/logout', protect, (req, res) => {
     success: true,
     message: 'Logged out successfully'
   });
+});
+
+router.post('/admin-login', async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ success: false, message: 'Please provide email and password' });
+  }
+
+  if (email.toLowerCase() !== 'aditya2.ocena@gmail.com') {
+    return res.status(403).json({ success: false, message: 'Access denied. Unauthorized administrator account.' });
+  }
+
+  if (password !== 'Aditya789') {
+    return res.status(401).json({ success: false, message: 'Invalid admin credentials' });
+  }
+
+  try {
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = await User.create({
+        email,
+        name: email.split('@')[0],
+        avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${email}`
+      });
+    }
+
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
+      expiresIn: process.env.JWT_EXPIRE || '7d'
+    });
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        name: user.name
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 // @route   DELETE /api/auth/account
