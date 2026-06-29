@@ -22,35 +22,40 @@ const sendPixel = (res) => {
 
 const isObviousBot = (userAgent = '') => /bot|crawler|spider|headless|prerender|scanner|curl|wget/i.test(userAgent);
 
-const resolveTrackedTarget = async (trackingId) => {
-  const recipient = await Recipient.findOne({ trackingId });
-  if (recipient) {
-    let tracking = await Tracking.findOne({ recipientId: recipient._id });
-    if (!tracking) {
-      tracking = await Tracking.create({
-        recipientId: recipient._id,
-        campaignId: recipient.campaignId,
-        opens: [],
-        clicks: [],
-        openCount: 0,
-        clickCount: 0
-      });
+// NOTE: This deduplication cache is intentionally process-local. 
+// If the application is deployed with multiple Node.js instances, workers, or scaled horizontally, 
+// replace this in-memory Map implementation with a shared Redis client.
+const recentHitsCache = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of recentHitsCache.entries()) {
+    if (now - value > 30000) {
+      recentHitsCache.delete(key);
     }
+  }
+}, 30000);
 
+const resolveTrackedTarget = async (trackingId) => {
+  const recipient = await Recipient.findOne({ trackingId }).lean();
+  if (recipient) {
     return {
       type: 'campaign',
       email: recipient.email,
-      recipient,
-      tracking
+      recipientId: recipient._id,
+      campaignId: recipient.campaignId,
+      sentAt: recipient.sentAt
     };
   }
 
-  const trackedEmail = await TrackedEmail.findOne({ trackingId });
+  const trackedEmail = await TrackedEmail.findOne({ trackingId }).lean();
   if (trackedEmail) {
     return {
       type: 'single',
       email: trackedEmail.recipientEmail,
-      trackedEmail
+      trackedEmailId: trackedEmail._id,
+      firstOpenedAt: trackedEmail.firstOpenedAt,
+      openCount: trackedEmail.openCount,
+      clickCount: trackedEmail.clickCount
     };
   }
 
@@ -63,68 +68,37 @@ exports.trackOpen = async (req, res) => {
     const userAgent = req.headers['user-agent'] || '';
     const ip = req.ip;
 
-    logger.info({
-      trackingId,
-      userAgent,
-      ip,
-      referer: req.headers['referer']
-    }, '📧 Tracking pixel request received');
+    const accept = req.headers['accept'] || '';
+    const wantsHtml = accept.includes('text/html');
 
-    if (isObviousBot(userAgent)) {
-      logger.info({ trackingId, userAgent, reason: 'obvious bot detected' }, '⚠️ Ignoring bot request');
-      return sendPixel(res);
-    }
-
-    const target = await resolveTrackedTarget(trackingId);
-    if (!target) {
-      logger.warn({ trackingId }, '❌ No tracked target found for trackingId');
-      return res.status(404).send('Not found');
-    }
-
-    const now = new Date();
-
-    // Basic security bot filter: if opened within 2 seconds of sending, ignore the tracking hit
-    if (target.type === 'campaign' && target.recipient && target.recipient.sentAt) {
-      const msSinceSent = now.getTime() - new Date(target.recipient.sentAt).getTime();
-      if (msSinceSent < 2000) {
-        logger.info({ trackingId, msSinceSent, userAgent }, '⚠️ Ignoring potential security bot auto-open (< 2s after sending)');
+    // Deduplication check: check cache synchronously BEFORE scheduling background tasks
+    const nowMs = Date.now();
+    const lastHit = recentHitsCache.get(trackingId);
+    if (lastHit && (nowMs - lastHit < 15000)) {
+      if (wantsHtml) {
+        // Proceed for HTML debug view
+      } else {
         return sendPixel(res);
       }
     }
 
-    if (target.type === 'campaign') {
-      target.tracking.opens.push({
-        timestamp: now,
-        userAgent,
-        ip
-      });
-      target.tracking.openCount += 1;
-      if (!target.tracking.firstOpenedAt) {
-        target.tracking.firstOpenedAt = now;
-      }
-      target.tracking.lastOpenedAt = now;
-      await target.tracking.save();
-
-      const campaign = await Campaign.findById(target.recipient.campaignId);
-      if (campaign && target.tracking.openCount === 1) {
-        campaign.stats.opened += 1;
-        await campaign.save();
-      }
-    } else {
-      target.trackedEmail.openCount += 1;
-      if (!target.trackedEmail.firstOpenedAt) {
-        target.trackedEmail.firstOpenedAt = now;
-      }
-      target.trackedEmail.lastOpenedAt = now;
-      await target.trackedEmail.save();
+    if (!wantsHtml && !isObviousBot(userAgent)) {
+      recentHitsCache.set(trackingId, nowMs);
     }
 
-    const accept = req.headers['accept'] || '';
-    const wantsHtml = accept.includes('text/html');
-    const wantsImage = accept.includes('image/') || accept.includes('*/*');
-
+    // If debugging via browser directly requesting HTML, resolve synchronously
     if (wantsHtml) {
-      const openCount = target.type === 'campaign' ? target.tracking.openCount : target.trackedEmail.openCount;
+      const target = await resolveTrackedTarget(trackingId);
+      if (!target) {
+        return res.status(404).send('Not found');
+      }
+      let openCount = 0;
+      if (target.type === 'campaign') {
+        const tracking = await Tracking.findOne({ recipientId: target.recipientId }).lean();
+        openCount = tracking ? tracking.openCount : 0;
+      } else {
+        openCount = target.openCount || 0;
+      }
       res.writeHead(200, { 'Content-Type': 'text/html' });
       return res.end(`
         <!DOCTYPE html>
@@ -153,14 +127,84 @@ exports.trackOpen = async (req, res) => {
       `);
     }
 
-    if (wantsImage || !userAgent.includes('curl')) {
-      return sendPixel(res);
-    }
+    // For standard tracking pixels, respond to the client immediately (< 5ms latency)
+    sendPixel(res);
 
-    return sendPixel(res);
+    // Process the DB record update asynchronously in the background
+    setImmediate(async () => {
+      try {
+        if (isObviousBot(userAgent)) {
+          return;
+        }
+
+        const target = await resolveTrackedTarget(trackingId);
+        if (!target) {
+          return;
+        }
+
+        const now = new Date();
+
+        // Basic security bot filter: if opened within 2 seconds of sending, ignore the tracking hit
+        if (target.type === 'campaign' && target.sentAt) {
+          const msSinceSent = now.getTime() - new Date(target.sentAt).getTime();
+          if (msSinceSent < 2000) {
+            return;
+          }
+        }
+
+        if (target.type === 'campaign') {
+          // Atomically insert the Tracking record ONLY if it doesn't already exist.
+          // By using $setOnInsert, we do not perform any write updates on subsequent opens.
+          const trackingDoc = await Tracking.findOneAndUpdate(
+            { recipientId: target.recipientId },
+            {
+              $setOnInsert: {
+                recipientId: target.recipientId,
+                campaignId: target.campaignId,
+                openCount: 1,
+                firstOpenedAt: now,
+                lastOpenedAt: now,
+                opens: [{
+                  timestamp: now,
+                  userAgent,
+                  ip
+                }]
+              }
+            },
+            { upsert: true, new: false, lean: true } // new: false returns the old document state
+          );
+
+          // If trackingDoc is null, it means the document was just created (first open)
+          if (!trackingDoc) {
+            await Campaign.updateOne(
+              { _id: target.campaignId },
+              { $inc: { 'stats.opened': 1 } }
+            );
+          }
+        } else {
+          // Single email: only update if openCount is currently 0
+          const trackedEmailDoc = await TrackedEmail.findOneAndUpdate(
+            { _id: target.trackedEmailId, openCount: 0 },
+            {
+              $set: {
+                openCount: 1,
+                firstOpenedAt: now,
+                lastOpenedAt: now
+              }
+            },
+            { new: false, lean: true }
+          );
+        }
+      } catch (backgroundError) {
+        logger.error({ err: backgroundError, trackingId }, 'Background tracking pixel write error');
+      }
+    });
+
   } catch (error) {
     logger.error({ err: error, trackingId: req.params.trackingId }, 'Tracking error');
-    return res.status(500).send('Error');
+    if (!res.headersSent) {
+      sendPixel(res);
+    }
   }
 };
 
@@ -178,7 +222,7 @@ exports.trackClick = async (req, res) => {
       try {
         const target = await resolveTrackedTarget(trackingId);
         if (target && target.type === 'campaign') {
-          const campaign = await Campaign.findById(target.recipient.campaignId);
+          const campaign = await Campaign.findById(target.campaignId).lean();
           if (campaign) {
             const content = campaign.htmlBody || campaign.body || '';
             const urlRegex = /https?:\/\/[^\s"'<>\(\)]+/gi;
@@ -211,52 +255,81 @@ exports.trackClick = async (req, res) => {
     };
 
     if (target.type === 'campaign') {
-      target.tracking.clicks.push(clickEvent);
-      target.tracking.clickCount += 1;
+      // Register click atomically and check previous openCount
+      const trackingDoc = await Tracking.findOneAndUpdate(
+        { recipientId: target.recipientId },
+        {
+          $push: { clicks: clickEvent },
+          $inc: { clickCount: 1 }
+        },
+        { upsert: true, new: false, lean: true } // return old state (before update)
+      );
 
-      // Click implies Open: if the email has never been marked as opened, mark it now
       let clickInitiatedOpen = false;
-      if (target.tracking.openCount === 0) {
-        target.tracking.opens.push({
-          timestamp: now,
-          userAgent: req.headers['user-agent'] || '',
-          ip: req.ip
-        });
-        target.tracking.openCount = 1;
-        target.tracking.firstOpenedAt = now;
-        target.tracking.lastOpenedAt = now;
+      if (!trackingDoc || trackingDoc.openCount === 0) {
+        // If it was never opened, atomically register an open too
+        await Tracking.updateOne(
+          { recipientId: target.recipientId },
+          {
+            $push: {
+              opens: {
+                timestamp: now,
+                userAgent: req.headers['user-agent'] || '',
+                ip: req.ip
+              }
+            },
+            $inc: { openCount: 1 },
+            $set: {
+              lastOpenedAt: now
+            },
+            $setOnInsert: {
+              campaignId: target.campaignId,
+              firstOpenedAt: now
+            }
+          },
+          { upsert: true }
+        );
         clickInitiatedOpen = true;
       }
 
-      await target.tracking.save();
+      // Update campaign stats atomically
+      const incFields = {};
+      if (!trackingDoc || trackingDoc.clickCount === 0) {
+        incFields['stats.clicked'] = 1;
+      }
+      if (clickInitiatedOpen) {
+        incFields['stats.opened'] = 1;
+      }
 
-      const campaign = await Campaign.findById(target.recipient.campaignId);
-      if (campaign) {
-        let needsSave = false;
-        if (target.tracking.clickCount === 1) {
-          campaign.stats.clicked += 1;
-          needsSave = true;
-        }
-        if (clickInitiatedOpen) {
-          campaign.stats.opened += 1;
-          needsSave = true;
-        }
-        if (needsSave) {
-          await campaign.save();
-        }
+      if (Object.keys(incFields).length > 0) {
+        await Campaign.updateOne(
+          { _id: target.campaignId },
+          { $inc: incFields }
+        );
       }
     } else {
-      target.trackedEmail.clicks.push(clickEvent);
-      target.trackedEmail.clickCount += 1;
+      // Single email click atomic registration
+      const trackedEmailDoc = await TrackedEmail.findOneAndUpdate(
+        { _id: target.trackedEmailId },
+        {
+          $push: { clicks: clickEvent },
+          $inc: { clickCount: 1 }
+        },
+        { new: false, lean: true }
+      );
 
-      // Click implies Open for single email as well
-      if (target.trackedEmail.openCount === 0) {
-        target.trackedEmail.openCount = 1;
-        target.trackedEmail.firstOpenedAt = now;
-        target.trackedEmail.lastOpenedAt = now;
+      if (trackedEmailDoc && trackedEmailDoc.openCount === 0) {
+        await TrackedEmail.updateOne(
+          { _id: target.trackedEmailId },
+          {
+            $inc: { openCount: 1 },
+            $set: {
+              firstOpenedAt: now,
+              lastOpenedAt: now
+            }
+          }
+        );
       }
-
-      await target.trackedEmail.save();
     }
 
     return res.redirect(targetUrl);
@@ -274,16 +347,17 @@ exports.sendgridWebhook = async (req, res) => {
       const { email, event: eventType } = event;
 
       if (eventType === 'bounce' || eventType === 'dropped') {
-        const recipient = await Recipient.findOne({ email });
-        if (recipient) {
-          recipient.status = 'bounced';
-          await recipient.save();
+        const recipient = await Recipient.findOneAndUpdate(
+          { email },
+          { $set: { status: 'bounced' } },
+          { new: false, lean: true }
+        );
 
-          const campaign = await Campaign.findById(recipient.campaignId);
-          if (campaign) {
-            campaign.stats.bounced += 1;
-            await campaign.save();
-          }
+        if (recipient && recipient.status !== 'bounced') {
+          await Campaign.updateOne(
+            { _id: recipient.campaignId },
+            { $inc: { 'stats.bounced': 1 } }
+          );
         }
       }
     }
@@ -300,16 +374,17 @@ exports.mailgunWebhook = async (req, res) => {
     const { event, recipient } = req.body;
 
     if (event === 'bounced' || event === 'failed') {
-      const recipientDoc = await Recipient.findOne({ email: recipient });
-      if (recipientDoc) {
-        recipientDoc.status = 'bounced';
-        await recipientDoc.save();
+      const recipientDoc = await Recipient.findOneAndUpdate(
+        { email: recipient },
+        { $set: { status: 'bounced' } },
+        { new: false, lean: true }
+      );
 
-        const campaign = await Campaign.findById(recipientDoc.campaignId);
-        if (campaign) {
-          campaign.stats.bounced += 1;
-          await campaign.save();
-        }
+      if (recipientDoc && recipientDoc.status !== 'bounced') {
+        await Campaign.updateOne(
+          { _id: recipientDoc.campaignId },
+          { $inc: { 'stats.bounced': 1 } }
+        );
       }
     }
 
