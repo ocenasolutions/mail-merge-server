@@ -217,8 +217,22 @@ exports.trackClick = async (req, res) => {
       return res.status(400).send('Missing target URL');
     }
 
+    // Deduplication check: check cache synchronously BEFORE doing background work
+    const nowMs = Date.now();
+    const cacheKey = `${trackingId}-${targetUrl}`;
+    const lastHit = recentHitsCache.get(cacheKey);
+    if (lastHit && (nowMs - lastHit < 5000)) {
+      return res.redirect(targetUrl);
+    }
+    recentHitsCache.set(cacheKey, nowMs);
+
     // Proactive recovery fallback for placeholder/broken redirects (e.g. href="https://")
-    if (targetUrl === 'https://' || targetUrl === 'http://' || targetUrl === 'https' || targetUrl === 'http') {
+    const needsRecovery = targetUrl === 'https://' || targetUrl === 'http://' || targetUrl === 'https' || targetUrl === 'http';
+
+    const userAgent = req.headers['user-agent'] || '';
+    const ip = req.ip;
+
+    if (needsRecovery) {
       try {
         const target = await resolveTrackedTarget(trackingId);
         if (target && target.type === 'campaign') {
@@ -239,103 +253,118 @@ exports.trackClick = async (req, res) => {
       } catch (err) {
         logger.error({ err, trackingId }, 'Error resolving recovery redirect URL');
       }
-    }
-
-    const target = await resolveTrackedTarget(trackingId);
-    if (!target) {
-      return res.redirect(targetUrl);
-    }
-
-    const now = new Date();
-    const clickEvent = {
-      url: targetUrl,
-      timestamp: now,
-      userAgent: req.headers['user-agent'] || '',
-      ip: req.ip
-    };
-
-    if (target.type === 'campaign') {
-      // Register click atomically and check previous openCount
-      const trackingDoc = await Tracking.findOneAndUpdate(
-        { recipientId: target.recipientId },
-        {
-          $push: { clicks: clickEvent },
-          $inc: { clickCount: 1 }
-        },
-        { upsert: true, new: false, lean: true } // return old state (before update)
-      );
-
-      let clickInitiatedOpen = false;
-      if (!trackingDoc || trackingDoc.openCount === 0) {
-        // If it was never opened, atomically register an open too
-        await Tracking.updateOne(
-          { recipientId: target.recipientId },
-          {
-            $push: {
-              opens: {
-                timestamp: now,
-                userAgent: req.headers['user-agent'] || '',
-                ip: req.ip
-              }
-            },
-            $inc: { openCount: 1 },
-            $set: {
-              lastOpenedAt: now
-            },
-            $setOnInsert: {
-              campaignId: target.campaignId,
-              firstOpenedAt: now
-            }
-          },
-          { upsert: true }
-        );
-        clickInitiatedOpen = true;
-      }
-
-      // Update campaign stats atomically
-      const incFields = {};
-      if (!trackingDoc || trackingDoc.clickCount === 0) {
-        incFields['stats.clicked'] = 1;
-      }
-      if (clickInitiatedOpen) {
-        incFields['stats.opened'] = 1;
-      }
-
-      if (Object.keys(incFields).length > 0) {
-        await Campaign.updateOne(
-          { _id: target.campaignId },
-          { $inc: incFields }
-        );
-      }
+      res.redirect(targetUrl);
     } else {
-      // Single email click atomic registration
-      const trackedEmailDoc = await TrackedEmail.findOneAndUpdate(
-        { _id: target.trackedEmailId },
-        {
-          $push: { clicks: clickEvent },
-          $inc: { clickCount: 1 }
-        },
-        { new: false, lean: true }
-      );
-
-      if (trackedEmailDoc && trackedEmailDoc.openCount === 0) {
-        await TrackedEmail.updateOne(
-          { _id: target.trackedEmailId },
-          {
-            $inc: { openCount: 1 },
-            $set: {
-              firstOpenedAt: now,
-              lastOpenedAt: now
-            }
-          }
-        );
-      }
+      res.redirect(targetUrl);
     }
 
-    return res.redirect(targetUrl);
+    // Process the DB record update asynchronously in the background
+    setImmediate(async () => {
+      try {
+        if (isObviousBot(userAgent)) {
+          return;
+        }
+
+        const target = await resolveTrackedTarget(trackingId);
+        if (!target) {
+          return;
+        }
+
+        const now = new Date();
+        const clickEvent = {
+          url: targetUrl,
+          timestamp: now,
+          userAgent,
+          ip
+        };
+
+        if (target.type === 'campaign') {
+          // Register click atomically and check previous openCount
+          const trackingDoc = await Tracking.findOneAndUpdate(
+            { recipientId: target.recipientId },
+            {
+              $push: { clicks: clickEvent },
+              $inc: { clickCount: 1 }
+            },
+            { upsert: true, new: false, lean: true } // return old state (before update)
+          );
+
+          let clickInitiatedOpen = false;
+          if (!trackingDoc || trackingDoc.openCount === 0) {
+            // If it was never opened, atomically register an open too
+            await Tracking.updateOne(
+              { recipientId: target.recipientId },
+              {
+                $push: {
+                  opens: {
+                    timestamp: now,
+                    userAgent,
+                    ip
+                  }
+                },
+                $inc: { openCount: 1 },
+                $set: {
+                  lastOpenedAt: now
+                },
+                $setOnInsert: {
+                  campaignId: target.campaignId,
+                  firstOpenedAt: now
+                }
+              },
+              { upsert: true }
+            );
+            clickInitiatedOpen = true;
+          }
+
+          // Update campaign stats atomically
+          const incFields = {};
+          if (!trackingDoc || trackingDoc.clickCount === 0) {
+            incFields['stats.clicked'] = 1;
+          }
+          if (clickInitiatedOpen) {
+            incFields['stats.opened'] = 1;
+          }
+
+          if (Object.keys(incFields).length > 0) {
+            await Campaign.updateOne(
+              { _id: target.campaignId },
+              { $inc: incFields }
+            );
+          }
+        } else {
+          // Single email click atomic registration
+          const trackedEmailDoc = await TrackedEmail.findOneAndUpdate(
+            { _id: target.trackedEmailId },
+            {
+              $push: { clicks: clickEvent },
+              $inc: { clickCount: 1 }
+            },
+            { new: false, lean: true }
+          );
+
+          if (trackedEmailDoc && trackedEmailDoc.openCount === 0) {
+            await TrackedEmail.updateOne(
+              { _id: target.trackedEmailId },
+              {
+                $inc: { openCount: 1 },
+                $set: {
+                  firstOpenedAt: now,
+                  lastOpenedAt: now
+                }
+              }
+            );
+          }
+        }
+      } catch (backgroundError) {
+        logger.error({ err: backgroundError, trackingId }, 'Background tracking click write error');
+      }
+    });
+
   } catch (error) {
     logger.error({ err: error, trackingId: req.params.trackingId }, 'Click tracking error');
-    return res.status(500).send('Error');
+    if (!res.headersSent) {
+      return res.status(500).send('Error');
+    }
   }
 };
 

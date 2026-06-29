@@ -89,6 +89,7 @@ const syncCampaignJobs = async (campaign, options = {}) => {
 
   const cursor = Recipient.find(query)
     .select('_id email mergeData status trackingId attemptCount nextAttemptAt lastAttemptAt sentAt provider providerMessageId sentSubject error')
+    .lean()
     .cursor();
 
   let bulkOps = [];

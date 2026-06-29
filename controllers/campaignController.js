@@ -80,13 +80,17 @@ exports.getCampaigns = async (req, res) => {
   try {
     const campaigns = await Campaign.find({ userId: req.user._id })
       .populate('emailConfigId', 'name provider email config.email')
-      .sort('-createdAt');
+      .sort('-createdAt')
+      .lean();
 
     const campaignIds = campaigns.map((campaign) => campaign._id);
     const recipients = await Recipient.find({ campaignId: { $in: campaignIds } })
-      .sort({ createdAt: 1 });
+      .select('campaignId email mergeData status error replyCount')
+      .sort({ _id: 1 })
+      .lean();
     const trackingDocs = await Tracking.find({ campaignId: { $in: campaignIds } })
-      .select('campaignId recipientId openCount clickCount firstOpenedAt lastOpenedAt opens clicks');
+      .select('campaignId recipientId openCount clickCount firstOpenedAt lastOpenedAt')
+      .lean();
 
     const recipientsByCampaign = new Map();
     const trackingByRecipient = new Map();
@@ -98,17 +102,8 @@ exports.getCampaigns = async (req, res) => {
         clickCount: tracking.clickCount || 0,
         firstOpenedAt: tracking.firstOpenedAt || null,
         lastOpenedAt: tracking.lastOpenedAt || null,
-        opens: Array.isArray(tracking.opens) ? tracking.opens.map((open) => ({
-          timestamp: open.timestamp || null,
-          userAgent: open.userAgent || '',
-          ip: open.ip || ''
-        })) : [],
-        clicks: Array.isArray(tracking.clicks) ? tracking.clicks.map((click) => ({
-          url: click.url || '',
-          timestamp: click.timestamp || null,
-          userAgent: click.userAgent || '',
-          ip: click.ip || ''
-        })) : []
+        opens: [],
+        clicks: []
       });
 
       const key = String(tracking.campaignId);
@@ -151,7 +146,7 @@ exports.getCampaigns = async (req, res) => {
     }
 
     const data = campaigns.map((campaign) => {
-      const campaignJson = campaign.toObject();
+      const campaignJson = campaign;
       const senderEmail = campaignJson.emailConfigId?.config?.email
         || campaignJson.emailConfigId?.email
         || null;
@@ -567,7 +562,7 @@ exports.getRecipients = async (req, res) => {
     const campaign = await Campaign.findOne({
       _id: req.params.id,
       userId: req.user._id
-    });
+    }).lean();
 
     if (!campaign) {
       return res.status(404).json({ success: false, message: 'Campaign not found' });
@@ -575,27 +570,26 @@ exports.getRecipients = async (req, res) => {
 
     const recipients = await Recipient.find({ campaignId: campaign._id })
       .sort('-createdAt')
-      .limit(1000);
+      .limit(1000)
+      .lean();
 
-    // Get tracking data for each recipient
-    const recipientsWithTracking = await Promise.all(
-      recipients.map(async (recipient) => {
-        const tracking = await require('../models/Tracking').findOne({ 
-          recipientId: recipient._id 
-        });
-        
-        return {
-          ...recipient.toObject(),
-          tracking: tracking ? {
-            openCount: tracking.openCount,
-            firstOpenedAt: tracking.firstOpenedAt,
-            lastOpenedAt: tracking.lastOpenedAt,
-            clickCount: tracking.clickCount,
-            clicks: tracking.clicks || []
-          } : null
-        };
-      })
-    );
+    const recipientIds = recipients.map((r) => r._id);
+    const trackingDocs = await require('../models/Tracking').find({ recipientId: { $in: recipientIds } }).lean();
+    const trackingMap = new Map(trackingDocs.map((doc) => [String(doc.recipientId), doc]));
+
+    const recipientsWithTracking = recipients.map((recipient) => {
+      const tracking = trackingMap.get(String(recipient._id));
+      return {
+        ...recipient,
+        tracking: tracking ? {
+          openCount: tracking.openCount,
+          firstOpenedAt: tracking.firstOpenedAt,
+          lastOpenedAt: tracking.lastOpenedAt,
+          clickCount: tracking.clickCount,
+          clicks: tracking.clicks || []
+        } : null
+      };
+    });
 
     // Disable caching for real-time tracking updates
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -845,12 +839,12 @@ exports.retryFailed = async (req, res) => {
       });
     }
 
-    const failedRecipients = await Recipient.find({
+    const failedCount = await Recipient.countDocuments({
       campaignId: campaign._id,
       status: 'failed'
     });
 
-    if (failedRecipients.length === 0) {
+    if (failedCount === 0) {
       return res.status(400).json({ 
         success: false, 
         message: 'No failed recipients to retry' 
@@ -861,9 +855,9 @@ exports.retryFailed = async (req, res) => {
 
     res.json({
       success: true,
-      message: `Retrying ${failedRecipients.length} failed recipients`,
+      message: `Retrying ${failedCount} failed recipients`,
       data: {
-        retriedCount: failedRecipients.length,
+        retriedCount: failedCount,
         campaign: updatedCampaign
       }
     });

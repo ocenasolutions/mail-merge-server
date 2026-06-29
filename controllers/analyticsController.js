@@ -62,30 +62,21 @@ exports.getDashboardStats = async (req, res) => {
     await throttleSync(userId);
 
     const campaigns = filterCampaignsByAccount(
-      await Campaign.find({ userId }).populate('emailConfigId', 'email config.email'),
+      await Campaign.find({ userId }).populate('emailConfigId', 'email config.email').lean(),
       req.query.accountId,
       req.user.email
     );
     const totalCampaigns = campaigns.length;
     const activeCampaigns = campaigns.filter((campaign) => ['sending', 'scheduled'].includes(campaign.status)).length;
-    const campaignIds = campaigns.map((campaign) => campaign._id);
-    const [trackingDocs, repliedRecipients] = await Promise.all([
-      Tracking.find({ campaignId: { $in: campaignIds } }).select('openCount clickCount'),
-      Recipient.find({
-        campaignId: { $in: campaignIds },
-        replyCount: { $gt: 0 }
-      }).select('_id')
-    ]);
 
     const stats = campaigns.reduce((acc, campaign) => {
-      acc.totalSent += campaign.stats.sent || 0;
-      acc.totalBounced += campaign.stats.bounced || 0;
+      acc.totalSent += campaign.stats?.sent || 0;
+      acc.totalBounced += campaign.stats?.bounced || 0;
+      acc.totalOpened += campaign.stats?.opened || 0;
+      acc.totalClicked += campaign.stats?.clicked || 0;
+      acc.totalReplies += campaign.stats?.replied || 0;
       return acc;
     }, { totalSent: 0, totalOpened: 0, totalBounced: 0, totalClicked: 0, totalReplies: 0 });
-
-    stats.totalOpened = trackingDocs.filter((doc) => (doc.openCount || 0) > 0).length;
-    stats.totalClicked = trackingDocs.filter((doc) => (doc.clickCount || 0) > 0).length;
-    stats.totalReplies = repliedRecipients.length;
 
     res.json({
       success: true,
@@ -108,14 +99,18 @@ exports.getCampaignStats = async (req, res) => {
     const campaign = await Campaign.findOne({
       _id: req.params.id,
       userId: req.user._id
-    });
+    }).lean();
 
     if (!campaign) {
       return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
 
-    const recipients = await Recipient.find({ campaignId: campaign._id });
-    const tracking = await Tracking.find({ campaignId: campaign._id });
+    const recipients = await Recipient.find({ campaignId: campaign._id })
+      .select('status replyCount isFallbackUsed repliedAt email')
+      .lean();
+    const tracking = await Tracking.find({ campaignId: campaign._id })
+      .select('recipientId campaignId openCount clickCount opens clicks')
+      .lean();
     const repliedRecipients = recipients.filter((recipient) => (recipient.replyCount || 0) > 0);
 
     const trackingMap = new Map(tracking.map((t) => [String(t.recipientId), t]));
@@ -217,7 +212,8 @@ exports.getRecentClicks = async (req, res) => {
     const campaigns = filterCampaignsByAccount(
       await Campaign.find({ userId: req.user._id })
       .populate('emailConfigId', 'email config.email')
-      .select('_id name senderEmail emailConfigId'),
+      .select('_id name senderEmail emailConfigId')
+      .lean(),
       req.query.accountId,
       req.user.email
     );
@@ -226,10 +222,11 @@ exports.getRecentClicks = async (req, res) => {
 
     const trackingDocs = await Tracking.find({ campaignId: { $in: campaignIds } })
       .sort('-updatedAt')
-      .limit(100);
+      .limit(100)
+      .lean();
 
     const recipientIds = trackingDocs.map((doc) => doc.recipientId);
-    const recipients = await Recipient.find({ _id: { $in: recipientIds } }).select('email campaignId');
+    const recipients = await Recipient.find({ _id: { $in: recipientIds } }).select('email campaignId').lean();
     const recipientMap = new Map(recipients.map((recipient) => [recipient._id.toString(), recipient]));
 
     const recentClicks = trackingDocs
@@ -263,7 +260,8 @@ exports.getRecentActivity = async (req, res) => {
       .populate('emailConfigId', 'email config.email')
       .sort('-updatedAt')
       .limit(10)
-      .select('name status stats updatedAt senderEmail emailConfigId'),
+      .select('name status stats updatedAt senderEmail emailConfigId')
+      .lean(),
       req.query.accountId,
       req.user.email
     );
@@ -274,7 +272,8 @@ exports.getRecentActivity = async (req, res) => {
     })
       .sort('-sentAt')
       .limit(20)
-      .populate('campaignId', 'name');
+      .populate('campaignId', 'name')
+      .lean();
 
     const recentReplies = await Recipient.find({
       campaignId: { $in: campaignIds },
@@ -282,7 +281,8 @@ exports.getRecentActivity = async (req, res) => {
     })
       .sort('-repliedAt')
       .limit(20)
-      .populate('campaignId', 'name');
+      .populate('campaignId', 'name')
+      .lean();
 
     res.json({
       success: true,
@@ -307,7 +307,8 @@ exports.getRecentOpens = async (req, res) => {
     const campaigns = filterCampaignsByAccount(
       await Campaign.find({ userId: req.user._id })
       .populate('emailConfigId', 'email config.email')
-      .select('_id name senderEmail emailConfigId'),
+      .select('_id name senderEmail emailConfigId')
+      .lean(),
       req.query.accountId,
       req.user.email
     );
@@ -316,10 +317,11 @@ exports.getRecentOpens = async (req, res) => {
 
     const trackingDocs = await Tracking.find({ campaignId: { $in: campaignIds } })
       .sort('-lastOpenedAt')
-      .limit(50);
+      .limit(50)
+      .lean();
 
     const recipientIds = trackingDocs.map((doc) => doc.recipientId);
-    const recipients = await Recipient.find({ _id: { $in: recipientIds } }).select('email campaignId');
+    const recipients = await Recipient.find({ _id: { $in: recipientIds } }).select('email campaignId').lean();
     const recipientMap = new Map(recipients.map((recipient) => [recipient._id.toString(), recipient]));
 
     const recentOpens = trackingDocs
@@ -352,7 +354,8 @@ exports.getLeads = async (req, res) => {
     const campaigns = filterCampaignsByAccount(
       await Campaign.find({ userId: req.user._id })
       .populate('emailConfigId', 'email config.email')
-      .select('_id name senderEmail emailConfigId'),
+      .select('_id name senderEmail emailConfigId')
+      .lean(),
       req.query.accountId,
       req.user.email
     );
@@ -363,13 +366,22 @@ exports.getLeads = async (req, res) => {
       replyCount: { $gt: 0 }
     })
       .sort({ leadScore: -1, repliedAt: -1 })
-      .limit(100);
+      .limit(100)
+      .lean();
+
+    const getMergeDataValue = (mergeData, key) => {
+      if (!mergeData) return '';
+      if (typeof mergeData.get === 'function') {
+        return mergeData.get(key) || mergeData.get(key.toLowerCase()) || mergeData.get(key.charAt(0).toUpperCase() + key.slice(1)) || '';
+      }
+      return mergeData[key] || mergeData[key.toLowerCase()] || mergeData[key.charAt(0).toUpperCase() + key.slice(1)] || '';
+    };
 
     res.json({
       success: true,
       data: recipients.map((recipient) => ({
-        name: recipient.mergeData?.get?.('name') || recipient.mergeData?.get?.('Name') || '',
-        company: recipient.mergeData?.get?.('company') || recipient.mergeData?.get?.('Company') || '',
+        name: getMergeDataValue(recipient.mergeData, 'Name') || getMergeDataValue(recipient.mergeData, 'name') || '',
+        company: getMergeDataValue(recipient.mergeData, 'Company') || getMergeDataValue(recipient.mergeData, 'company') || '',
         id: String(recipient._id),
         email: recipient.email,
         repliedAt: recipient.repliedAt,
@@ -396,7 +408,8 @@ exports.getFollowUps = async (req, res) => {
     const campaigns = filterCampaignsByAccount(
       await Campaign.find({ userId: req.user._id })
       .populate('emailConfigId', 'email config.email')
-      .select('_id name senderEmail emailConfigId'),
+      .select('_id name senderEmail emailConfigId')
+      .lean(),
       req.query.accountId,
       req.user.email
     );
@@ -409,14 +422,18 @@ exports.getFollowUps = async (req, res) => {
       replyCount: 0,
       sentAt: { $ne: null }
     })
+      .select('_id campaignId email sentAt')
       .sort({ sentAt: -1 })
-      .limit(200);
+      .limit(200)
+      .lean();
 
     const recipientIds = recipients.map((recipient) => recipient._id);
     const trackingDocs = await Tracking.find({
       recipientId: { $in: recipientIds },
       openCount: { $gt: 0 }
-    });
+    })
+      .select('recipientId openCount firstOpenedAt lastOpenedAt')
+      .lean();
 
     const trackingMap = new Map(trackingDocs.map((doc) => [String(doc.recipientId), doc]));
 
