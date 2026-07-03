@@ -209,15 +209,43 @@ const buildKnownAccountEmails = (user, configs) => {
 };
 
 const getGmailBody = (payload) => {
-  if (payload.parts) {
-    const textPart = payload.parts.find((part) => part.mimeType === 'text/plain');
-    if (textPart?.body?.data) {
-      return Buffer.from(textPart.body.data, 'base64').toString('utf-8');
+  if (!payload) return '';
+
+  const decodeBase64Url = (base64url) => {
+    if (!base64url) return '';
+    const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+    return Buffer.from(base64, 'base64').toString('utf-8');
+  };
+
+  const findPartsByMimeType = (part, mimeType) => {
+    let results = [];
+    if (part.mimeType === mimeType && part.body?.data) {
+      results.push(part);
     }
+    if (part.parts) {
+      for (const subPart of part.parts) {
+        results = results.concat(findPartsByMimeType(subPart, mimeType));
+      }
+    }
+    return results;
+  };
+
+  // 1. Try to extract plain text recursively
+  const plainParts = findPartsByMimeType(payload, 'text/plain');
+  if (plainParts.length > 0) {
+    return plainParts.map((part) => decodeBase64Url(part.body.data)).join('\n');
   }
 
+  // 2. Try to extract HTML and convert to plain text recursively
+  const htmlParts = findPartsByMimeType(payload, 'text/html');
+  if (htmlParts.length > 0) {
+    const htmlContent = htmlParts.map((part) => decodeBase64Url(part.body.data)).join('\n');
+    return buildPlainTextBody(htmlContent);
+  }
+
+  // 3. Fallback to top-level body
   if (payload.body?.data) {
-    return Buffer.from(payload.body.data, 'base64').toString('utf-8');
+    return decodeBase64Url(payload.body.data);
   }
 
   return '';
