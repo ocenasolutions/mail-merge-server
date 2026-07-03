@@ -28,6 +28,10 @@ const userSchema = new mongoose.Schema({
     get: decrypt
   },
   settings: {
+    outreachLink: {
+      type: String,
+      default: ''
+    },
     emailsPerMinute: {
       type: Number,
       default: 50
