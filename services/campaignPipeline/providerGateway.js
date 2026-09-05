@@ -29,6 +29,8 @@ const sendCampaignEmail = async ({ campaign, recipient, user, emailConfig, preRe
     recipient.trackingId,
     {
       trackingEnabled: campaign.trackingEnabled !== false,
+      cc: campaign.cc || undefined,
+      bcc: campaign.bcc || undefined,
       attachments: preResolvedAttachments.length > 0 ? preResolvedAttachments : (campaign.attachments || [])
     }
   );

@@ -1,6 +1,16 @@
 const axios = require('axios');
 
-const send = async ({ emailConfig, recipient, subject, htmlBody, textBody, attachments = [] }) => {
+const parseEmails = (input) => {
+  if (!input) return [];
+  if (Array.isArray(input)) return input.map(e => (typeof e === 'string' ? { email: e.trim() } : e)).filter(e => e.email);
+  return String(input)
+    .split(',')
+    .map(e => e.trim())
+    .filter(Boolean)
+    .map(email => ({ email }));
+};
+
+const send = async ({ emailConfig, recipient, subject, htmlBody, textBody, cc, bcc, attachments = [] }) => {
   const payload = {
     personalizations: [{ to: [{ email: recipient }] }],
     from: { email: emailConfig.config.email },
@@ -10,6 +20,11 @@ const send = async ({ emailConfig, recipient, subject, htmlBody, textBody, attac
       { type: 'text/html', value: htmlBody }
     ]
   };
+
+  const ccEmails = parseEmails(cc);
+  const bccEmails = parseEmails(bcc);
+  if (ccEmails.length > 0) payload.personalizations[0].cc = ccEmails;
+  if (bccEmails.length > 0) payload.personalizations[0].bcc = bccEmails;
 
   if (attachments && attachments.length > 0) {
     payload.attachments = attachments.map((attachment) => ({

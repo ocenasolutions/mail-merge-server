@@ -1106,6 +1106,8 @@ End the response with ${stopToken}`;
       recipient.trackingId,
       {
         trackingEnabled: campaign.trackingEnabled !== false,
+        cc: campaign.cc || undefined,
+        bcc: campaign.bcc || undefined,
         attachments: campaign.attachments || []
       }
     );

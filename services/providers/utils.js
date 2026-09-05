@@ -55,8 +55,8 @@ const buildRawMimeMessage = ({ from, to, subject, textBody, htmlBody, trackingId
   ];
 
   if (trackingId) lines.push(`X-Entity-Ref-ID: ${trackingId}`);
-  if (cc) lines.push(`Cc: ${cc}`);
-  if (bcc) lines.push(`Bcc: ${bcc}`);
+  if (cc) lines.push(Array.isArray(cc) ? `Cc: ${cc.join(', ')}` : `Cc: ${cc}`);
+  if (bcc) lines.push(Array.isArray(bcc) ? `Bcc: ${bcc.join(', ')}` : `Bcc: ${bcc}`);
 
   lines.push('');
 

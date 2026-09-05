@@ -667,10 +667,11 @@ const sendEmail = async (emailConfig, user, recipient, subject, body, trackingId
 };
 
 const testEmailConnection = async (emailConfig, user) => {
+  const provider = emailConfig?.provider;
   try {
-    const isGmailSmtp = emailConfig.provider === 'gmail' && !emailConfig.gmailRefreshToken && (emailConfig.config?.password || emailConfig.smtpPassword);
+    const isGmailSmtp = provider === 'gmail' && !emailConfig.gmailRefreshToken && (emailConfig.config?.password || emailConfig.smtpPassword);
     
-    switch (isGmailSmtp ? 'smtp' : emailConfig.provider) {
+    switch (isGmailSmtp ? 'smtp' : provider) {
       case 'gmail':
         const isPrimary = emailConfig._id === 'gmail' || emailConfig.name === 'Primary Gmail';
         const refreshToken = isPrimary ? user?.googleRefreshToken : emailConfig?.gmailRefreshToken;

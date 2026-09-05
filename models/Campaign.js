@@ -31,6 +31,16 @@ const campaignSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  cc: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  bcc: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   attachments: [{
     name: { type: String, required: true },
     mimeType: { type: String, default: 'application/octet-stream' },
