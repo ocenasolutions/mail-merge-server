@@ -1,4 +1,11 @@
 require('dotenv').config();
+const dns = require('dns');
+try {
+  dns.setServers(['8.8.8.8', '1.1.1.1']);
+} catch (err) {
+  // Ignore fallback error if setting DNS fails
+}
+
 const express = require('express');
 const http = require('http');
 const mongoose = require('mongoose');
@@ -73,7 +80,8 @@ app.use(cors({
       callback(new Error(`Not allowed by CORS: ${normalizedOrigin}`));
     }
   },
-  credentials: true
+  credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Email', 'x-user-email', 'Accept', 'X-Requested-With']
 }));
 app.use(express.json({ limit: jsonBodyLimit }));
 app.use(express.urlencoded({ extended: true, limit: jsonBodyLimit }));
@@ -84,7 +92,7 @@ app.use(passport.initialize());
 require('./config/passport')(passport);
 
 // Database connection
-mongoose.connect(process.env.MONGODB_URI)
+mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 5000 })
   .then(() => logger.info('MongoDB connected'))
   .catch(err => logger.error({ err }, 'MongoDB connection error'));
 
@@ -98,6 +106,12 @@ app.use('/api/tracking', require('./routes/tracking'));
 app.use('/api/analytics', require('./routes/analytics'));
 app.use('/api/emails', require('./routes/emails'));
 app.use('/api/metrics', require('./routes/metrics'));
+
+// Web-Pilot Lead Drop Scraper & ICP Intelligence Routes
+app.use('/api', require('./routes/webpilotSearch'));
+app.use('/api', require('./routes/webpilotSearches'));
+app.use('/api', require('./routes/webpilotOutreach'));
+app.use('/api', require('./routes/webpilotLeads'));
 app.get('/health', systemController.getHealth);
 
 // Tracking pixel endpoint
