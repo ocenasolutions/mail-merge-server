@@ -226,9 +226,102 @@ async function scrapeWebsite(inputUrl) {
   };
 }
 
+/**
+ * Resolves an input prompt (URL, domain, or organization/company name)
+ * into a clean domain, website URL, and organization brand name.
+ */
+async function resolveOrganizationDomain(inputPrompt = '') {
+  const prompt = (inputPrompt || '').trim();
+  if (!prompt) return { isWebsite: false, searchQuery: '' };
+
+  // 1. If input is explicitly a website URL or domain (e.g. husnbeautycompany.com, uniportal.co.in, https://...)
+  if (isWebsiteUrl(prompt)) {
+    const formattedUrl = formatUrl(prompt);
+    let domain = '';
+    try {
+      const u = new URL(formattedUrl);
+      domain = u.hostname.replace(/^www\./i, '').toLowerCase();
+    } catch (e) {
+      domain = prompt.toLowerCase().replace(/^https?:\/\//i, '').split('/')[0];
+    }
+    
+    // Clean brand name from domain
+    const rawBrand = domain.split('.')[0];
+    const formattedBrand = rawBrand.charAt(0).toUpperCase() + rawBrand.slice(1);
+
+    return {
+      isWebsite: true,
+      domain,
+      url: formattedUrl,
+      orgName: formattedBrand,
+      searchQuery: prompt
+    };
+  }
+
+  // 2. If input is an organization name or brand search (e.g. "Husn Beauty", "Uniportal India", "Razorpay", "Zomato", "Swiggy", "Urban Company")
+  const groqApiKey = process.env.GROQ_API_KEY;
+  if (groqApiKey) {
+    try {
+      const { callGroqAI } = require('./webpilotAiSynthesizer');
+      const sysPrompt = `You are a corporate intelligence domain resolver.
+Analyze the user search input and determine if it refers to a specific organization, company, business, startup, or brand (e.g. "Husn Beauty", "Uniportal", "Razorpay", "Swiggy", "Zomato", "Nykaa", "Urban Company", "Glossier", "Treatwell", "LeapScholar").
+If YES, identify its official primary domain (e.g. "husnbeautycompany.com", "uniportal.co.in", "razorpay.com", "swiggy.com", "zomato.com") and official company name.
+Return strictly valid JSON:
+{
+  "isOrganization": true,
+  "companyName": "Official Company Name",
+  "domain": "primarydomain.com"
+}
+If NO (if it is a generic query like "Find SaaS leads in London" or "Sales managers in Delhi"), return:
+{
+  "isOrganization": false
+}`;
+
+      const aiResult = await callGroqAI(`User Search Input: "${prompt}"`, sysPrompt, groqApiKey, 'qwen/qwen3.8-27b');
+      if (aiResult && aiResult.text) {
+        const match = aiResult.text.match(/\{[\s\S]*\}/);
+        if (match) {
+          const parsed = JSON.parse(match[0]);
+          if (parsed.isOrganization && parsed.domain) {
+            const cleanDomain = parsed.domain.toLowerCase().replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0].trim();
+            return {
+              isWebsite: true,
+              domain: cleanDomain,
+              url: `https://${cleanDomain}`,
+              orgName: parsed.companyName || prompt,
+              searchQuery: prompt
+            };
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('AI Domain resolution notice:', err.message);
+    }
+  }
+
+  // 3. Fallback heuristic: if input has no spaces and ends with common words or looks like a company name
+  const stripped = prompt.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (stripped.length >= 3 && !prompt.includes(' ')) {
+    return {
+      isWebsite: true,
+      domain: `${stripped}.com`,
+      url: `https://${stripped}.com`,
+      orgName: prompt,
+      searchQuery: prompt
+    };
+  }
+
+  return {
+    isWebsite: false,
+    searchQuery: prompt
+  };
+}
+
 module.exports = {
   isWebsiteUrl,
   formatUrl,
   scrapeWebsite,
-  fetchSerpApiData
+  fetchSerpApiData,
+  resolveOrganizationDomain
 };
+

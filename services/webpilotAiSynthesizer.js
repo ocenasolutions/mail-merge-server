@@ -196,27 +196,40 @@ async function callGeminiAI(prompt, systemInstruction = '', apiKey = '', model =
  */
 function heuristicSynthesize(scrapedData) {
   const domain = scrapedData.domain || 'company.com';
-  const text = `${domain} ${scrapedData.title || ''} ${scrapedData.description || ''} ${scrapedData.headline || ''}`.toLowerCase();
+  const text = `${scrapedData.orgName || ''} ${domain} ${scrapedData.title || ''} ${scrapedData.description || ''} ${scrapedData.headline || ''}`.toLowerCase();
 
-  let name = domain.split('.')[0].toUpperCase();
+  let name = scrapedData.orgName || domain.split('.')[0].toUpperCase();
   if (scrapedData.title && !scrapedData.title.toLowerCase().includes('official site')) {
     name = scrapedData.title.split('-')[0].split('|')[0].trim();
   }
+  if (scrapedData.orgName && scrapedData.orgName.length > 2) {
+    name = scrapedData.orgName;
+  }
 
-  let industry = 'B2B Software & Enterprise Tech';
-  let subIndustry = 'Cloud Platform & Digital Solutions';
+  let industry = 'Technology & Software';
+  let subIndustry = 'Digital Platforms & Services';
   let location = scrapedData.address || 'Global Operations';
 
-  if (text.includes('uniportal') || text.includes('university') || text.includes('education') || text.includes('portal') || text.includes('college') || text.includes('student') || text.includes('.co.in') || text.includes('.edu')) {
+  if (text.includes('beauty') || text.includes('salon') || text.includes('skincare') || text.includes('cosmetic') || text.includes('spa') || text.includes('hair') || text.includes('grooming') || text.includes('husn')) {
+    industry = 'Beauty & Personal Care';
+    subIndustry = 'Salon Services & Skincare E-Commerce';
+    if (text.includes('india') || text.includes('.in')) location = scrapedData.address || 'India Operations';
+  } else if (text.includes('uniportal') || text.includes('university') || text.includes('education') || text.includes('portal') || text.includes('college') || text.includes('student') || text.includes('.co.in') || text.includes('.edu') || text.includes('school')) {
     industry = 'Education Technology (EdTech) & Institutional Software';
     subIndustry = 'University & Higher Education Management Portal';
     if (text.includes('.co.in') || text.includes('india')) {
       location = scrapedData.address || 'India Operations';
     }
-  } else if (text.includes('stripe') || text.includes('pay') || text.includes('fintech') || text.includes('bank') || text.includes('billing')) {
+  } else if (text.includes('stripe') || text.includes('pay') || text.includes('fintech') || text.includes('bank') || text.includes('billing') || text.includes('payment') || text.includes('crypto') || text.includes('razorpay')) {
     industry = 'Fintech & Financial Infrastructure';
     subIndustry = 'Payments, Banking APIs & Merchant Billing';
-    location = scrapedData.address || 'San Francisco, CA & London, UK';
+    location = scrapedData.address || 'San Francisco, CA & Global';
+  } else if (text.includes('health') || text.includes('medical') || text.includes('clinic') || text.includes('doctor') || text.includes('pharma') || text.includes('hospital')) {
+    industry = 'Healthcare & Life Sciences';
+    subIndustry = 'Clinical Care & Digital Health Services';
+  } else if (text.includes('shop') || text.includes('store') || text.includes('cart') || text.includes('e-commerce') || text.includes('fashion') || text.includes('apparel')) {
+    industry = 'Retail & E-Commerce';
+    subIndustry = 'Direct-to-Consumer & Online Commerce';
   } else if (text.includes('data') || text.includes('ai') || text.includes('ml') || text.includes('intelligence') || text.includes('llm')) {
     industry = 'Artificial Intelligence & Data Systems';
     subIndustry = 'AI Infrastructure, Vector Databases & Analytics';
@@ -230,7 +243,7 @@ function heuristicSynthesize(scrapedData) {
   const tagline = scrapedData.headline || scrapedData.description || `Platform operating at ${domain}`;
   const overview = scrapedData.description && scrapedData.description.length > 10
     ? scrapedData.description
-    : `${name} is an established platform operating via ${domain}. The company provides digital infrastructure and software solutions tailored for its users.`;
+    : `${name} is an established organization operating via ${domain}. The company provides services and solutions tailored for its customers.`;
 
   return {
     name,
@@ -265,22 +278,27 @@ async function synthesizeCompanyProfile(scrapedData) {
   const groqKey = process.env.GROQ_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
   const geminiKey = process.env.GEMINI_API_KEY;
-  const groqModel = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+  const groqModel = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b';
 
   const heuristicProfile = heuristicSynthesize(scrapedData);
 
-  const systemPrompt = `You are a B2B Market Intelligence AI. Analyze the scraped website data and return a JSON object with:
+  const systemPrompt = `You are an expert B2B Market Intelligence AI Analyst. Analyze the scraped website data and target organization name to return a highly accurate, professional company profile in valid JSON format:
 {
-  "name": "Company Name",
-  "tagline": "One sentence value proposition",
-  "overview": "Detailed overview paragraph based on scraped text",
-  "industry": "Industry sector",
-  "subIndustry": "Sub-industry specialty",
-  "location": "Headquarters city/country"
+  "name": "Exact Official Company or Brand Name",
+  "tagline": "Clear, concise 1-sentence value proposition",
+  "overview": "Comprehensive 2-3 sentence company overview describing core products, services, target audience, and business model",
+  "industry": "Primary Industry Sector (e.g. Beauty & Personal Care, Education Technology, Fintech & Payments, Retail & E-Commerce, Healthcare)",
+  "subIndustry": "Specific Sub-Industry Niche",
+  "location": "Headquarters City, Country or Region"
 }
 Return valid JSON only.`;
 
-  const userPrompt = `Scraped Domain: ${scrapedData.domain}\nTitle: ${scrapedData.title}\nDescription: ${scrapedData.description}\nHeadline: ${scrapedData.headline}\nAddress: ${scrapedData.address || ''}`;
+  const userPrompt = `Target Organization Name: ${scrapedData.orgName || scrapedData.title || scrapedData.domain}
+Scraped Domain: ${scrapedData.domain}
+Title: ${scrapedData.title}
+Description: ${scrapedData.description}
+Headline: ${scrapedData.headline}
+Address / Location: ${scrapedData.address || ''}`;
 
   try {
     let aiText = '';

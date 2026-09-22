@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { isWebsiteUrl, scrapeWebsite } = require('../services/webpilotScraperService');
-const { synthesizeCompanyProfile } = require('../services/webpilotAiSynthesizer');
+const { isWebsiteUrl, scrapeWebsite, resolveOrganizationDomain } = require('../services/webpilotScraperService');
+const { synthesizeCompanyProfile, callGroqAI } = require('../services/webpilotAiSynthesizer');
 const { processCompetitorAnalysis, processCompetitorAnalysisAsync } = require('../services/webpilotCompetitorEngine');
 const { parseNaturalLanguageIntent } = require('../services/webpilotIntentParser');
 const { searchApolloPeople } = require('../services/apolloService');
@@ -17,12 +17,17 @@ router.post('/search', async (req, res) => {
     const prompt = req.body.prompt || req.body.query || '';
     const { filters = {}, userEmail = '' } = req.body;
     const emailToSave = userEmail || req.headers['x-user-email'] || req.user?.email || '';
-    const isUrl = isWebsiteUrl(prompt);
+    
+    // Resolve prompt to URL/Domain or Organization Name
+    const resolved = await resolveOrganizationDomain(prompt);
 
-    if (isUrl) {
+    if (resolved.isWebsite) {
       // --- STAGE 1: DEEP WEB & SERPAPI SCRAPING ---
-      const scrapeResult = await scrapeWebsite(prompt);
-      const rawScrapedData = scrapeResult.data;
+      const scrapeResult = await scrapeWebsite(resolved.url || prompt);
+      const rawScrapedData = {
+        ...(scrapeResult.data || {}),
+        orgName: resolved.orgName
+      };
 
       // --- STAGE 2 & STAGE 3: AI STUDY & SOCIAL/CONTACT SYNTHESIS ---
       const profile = await synthesizeCompanyProfile(rawScrapedData);
@@ -108,11 +113,11 @@ router.post('/search', async (req, res) => {
         console.warn('Apollo search API error:', err.message);
       }
 
-      // Build ICP Target Buyer Leads from Apollo API or synthesized icpProfile
-      const icpContacts = (analysis.icpProfile && analysis.icpProfile.decisionMakerContacts) || [];
+      // Build ICP Target Buyer Leads from real-time dynamic buyer account discovery or Apollo API
       let icpLeads = [];
-
-      if (apolloResult.contacts && apolloResult.contacts.length > 0) {
+      if (analysis.icpBuyerLeads && Array.isArray(analysis.icpBuyerLeads) && analysis.icpBuyerLeads.length > 0) {
+        icpLeads = analysis.icpBuyerLeads;
+      } else if (apolloResult.contacts && apolloResult.contacts.length > 0) {
         icpLeads = apolloResult.contacts.map((c, idx) => ({
           id: `apollo-icp-${idx}-${Date.now()}`,
           name: c.organization?.name || profile.name || profile.domain,
@@ -160,21 +165,22 @@ router.post('/search', async (req, res) => {
           }
         }));
       } else {
+        const icpContacts = (analysis.icpProfile && analysis.icpProfile.decisionMakerContacts) || [];
         icpLeads = icpContacts.map((c, idx) => ({
           id: `icp-lead-${idx}-${Date.now()}`,
           name: c.accountName || c.name,
           website: c.linkedin ? c.linkedin.replace('/in/', '/company/') : `https://${(c.email || '').split('@')[1] || 'target.com'}`,
           domain: (c.email || '').split('@')[1] || `icp-target-${idx}.com`,
-          industry: analysis.sectorInfo ? analysis.sectorInfo.industry : 'Education Technology',
-          subIndustry: analysis.sectorInfo ? analysis.sectorInfo.subIndustry : 'Higher Education Management',
+          industry: analysis.sectorInfo ? analysis.sectorInfo.industry : 'Enterprise Client',
+          subIndustry: analysis.sectorInfo ? analysis.sectorInfo.subIndustry : 'Target Account',
           location: c.location || 'Global',
           region: c.location || 'Global',
           employeeCount: 500,
           headcountRange: '201-1000',
-          fundingStage: 'Established Institution',
+          fundingStage: 'Target Customer Account',
           fundingAmount: 'N/A',
           investors: [],
-          techStack: ['ERP', 'Student Information System', 'Web Portal'],
+          techStack: ['ERP', 'Enterprise Software'],
           hiringIntent: true,
           openRoles: [c.role],
           description: `${c.accountName || c.name} — Ideal customer account for ${profile.name || profile.domain}. Contact: ${c.role}.`,
