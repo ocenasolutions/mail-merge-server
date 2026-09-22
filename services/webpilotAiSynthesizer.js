@@ -9,13 +9,13 @@ const https = require('https');
 /**
  * Call Groq AI API with automatic model retry fallback
  */
-async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requestedModel = 'llama-3.3-70b-versatile') {
+async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requestedModel = 'qwen/qwen3.8-27b') {
   const candidateModels = Array.from(new Set([
     requestedModel,
-    'llama-3.3-70b-versatile',
-    'llama-3.1-8b-instant',
-    'llama-3.2-11b-vision-preview',
-    'llama-3.2-3b-preview'
+    'qwen/qwen3.8-27b',
+    'allam-2-7b',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b'
   ])).filter(Boolean);
 
 
@@ -31,7 +31,7 @@ async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requested
             { role: 'user', content: prompt }
           ],
           temperature: 0.2,
-          max_tokens: 1000
+          max_tokens: 2500
         });
 
         const options = {

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { isWebsiteUrl, scrapeWebsite } = require('../services/webpilotScraperService');
 const { synthesizeCompanyProfile } = require('../services/webpilotAiSynthesizer');
-const { processCompetitorAnalysis } = require('../services/webpilotCompetitorEngine');
+const { processCompetitorAnalysis, processCompetitorAnalysisAsync } = require('../services/webpilotCompetitorEngine');
 const { parseNaturalLanguageIntent } = require('../services/webpilotIntentParser');
 const { searchApolloPeople } = require('../services/apolloService');
 const { searchLeads } = require('../services/vectorEngine');
@@ -27,8 +27,8 @@ router.post('/search', async (req, res) => {
       // --- STAGE 2 & STAGE 3: AI STUDY & SOCIAL/CONTACT SYNTHESIS ---
       const profile = await synthesizeCompanyProfile(rawScrapedData);
 
-      // --- STAGE 4: COMPETITOR & ECOSYSTEM DISCOVERY ---
-      const analysis = processCompetitorAnalysis(rawScrapedData);
+      // --- STAGE 4: REAL-TIME COMPETITOR & ECOSYSTEM DISCOVERY ---
+      const analysis = await processCompetitorAnalysisAsync(rawScrapedData);
 
       const workflowSteps = [
         {

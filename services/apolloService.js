@@ -82,6 +82,7 @@ async function searchApolloPeople(domain = '', options = {}) {
   }
 
   const cleanDomain = domain.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim();
+  const isIndianDomain = cleanDomain.endsWith('.in') || cleanDomain.endsWith('.co.in');
 
   const payload = {
     q_organization_domains: cleanDomain ? [cleanDomain] : undefined,
@@ -90,10 +91,17 @@ async function searchApolloPeople(domain = '', options = {}) {
     person_titles: options.titles || [
       'CEO', 'Founder', 'Co-Founder', 'Managing Director', 'VP Sales', 
       'Head of Growth', 'Director of Marketing', 'Chief Technology Officer', 'CTO', 'VP Engineering'
-    ]
+    ],
+    ...(options.personLocations || isIndianDomain ? { person_locations: options.personLocations || ['India'] } : {})
   };
 
-  const response = await callApolloApi('/v1/mixed_people/search', payload);
+  let response = await callApolloApi('/v1/mixed_people/search', payload);
+
+  // If location-restricted search returns 0 results, retry without location restriction
+  if (payload.person_locations && (!response.success || !response.data || (!response.data.people?.length && !response.data.contacts?.length))) {
+    delete payload.person_locations;
+    response = await callApolloApi('/v1/mixed_people/search', payload);
+  }
 
   if (!response.success || !response.data) {
     return { success: false, contacts: [], message: response.message };
