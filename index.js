@@ -107,7 +107,8 @@ app.use('/api/analytics', require('./routes/analytics'));
 app.use('/api/emails', require('./routes/emails'));
 app.use('/api/metrics', require('./routes/metrics'));
 
-// Web-Pilot Lead Drop Scraper & ICP Intelligence Routes
+app.use('/api', require('./routes/companyIntelligence'));
+app.use('/api', require('./routes/b2bCompanyRoutes'));
 app.use('/api', require('./routes/webpilotSearch'));
 app.use('/api', require('./routes/webpilotSearches'));
 app.use('/api', require('./routes/webpilotOutreach'));

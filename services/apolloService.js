@@ -109,29 +109,35 @@ async function searchApolloPeople(domain = '', options = {}) {
 
   const rawPeople = response.data.people || response.data.contacts || [];
 
-  const contacts = rawPeople.map((person, idx) => ({
-    id: person.id || `apollo-${idx + 1}`,
-    name: person.name || `${person.first_name || ''} ${person.last_name || ''}`.trim() || 'Executive',
-    first_name: person.first_name || '',
-    last_name: person.last_name || '',
-    title: person.title || 'Decision Maker',
-    email: person.email || `${(person.first_name || 'contact').toLowerCase()}@${cleanDomain}`,
-    emailStatus: person.email_status || 'verified',
-    linkedin: person.linkedin_url || person.linkedin || null,
-    twitter: person.twitter_url || null,
-    city: person.city || null,
-    state: person.state || null,
-    country: person.country || null,
-    organization: person.organization ? {
-      name: person.organization.name || cleanDomain,
-      primaryDomain: person.organization.primary_domain || cleanDomain,
-      estimatedEmployees: person.organization.estimated_num_employees || null,
-      industry: person.organization.industry || null,
-      keywords: person.organization.keywords || []
-    } : null,
-    verified: true,
-    confidenceScore: person.email_status === 'verified' ? 99 : 85
-  }));
+  const contacts = rawPeople.map((person, idx) => {
+    const fullName = person.name || `${person.first_name || ''} ${person.last_name || ''}`.trim() || person.title || 'Corporate Contact';
+    const realEmail = person.email || '';
+    const isVerified = Boolean(realEmail && (person.email_status === 'verified' || person.email_status === 'valid'));
+
+    return {
+      id: person.id || `apollo-${idx + 1}`,
+      name: fullName,
+      first_name: person.first_name || '',
+      last_name: person.last_name || '',
+      title: person.title || 'Executive Lead',
+      email: realEmail,
+      emailStatus: person.email_status || (realEmail ? 'unverified' : 'unavailable'),
+      linkedin: person.linkedin_url || person.linkedin || null,
+      twitter: person.twitter_url || null,
+      city: person.city || null,
+      state: person.state || null,
+      country: person.country || null,
+      organization: person.organization ? {
+        name: person.organization.name || cleanDomain,
+        primaryDomain: person.organization.primary_domain || cleanDomain,
+        estimatedEmployees: person.organization.estimated_num_employees || null,
+        industry: person.organization.industry || null,
+        keywords: person.organization.keywords || []
+      } : null,
+      verified: isVerified,
+      confidenceScore: isVerified ? 99 : (realEmail ? 75 : 0)
+    };
+  });
 
   return {
     success: true,

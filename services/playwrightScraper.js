@@ -33,16 +33,18 @@ function extractEmailsFromText(text = '') {
 function extractPhonesFromText(text = '') {
   const phones = new Set();
   
-  // Regex pattern for international & local phone formats (+91, +1, 1800, (xxx)...)
-  const phonePattern = /(\+\d{1,3}[-.\s]?)?(\(?\d{2,5}\)?[-.\s]?)?\d{3,5}[-.\s]?\d{3,5}/g;
+  // Explicit phone pattern requiring country code, 1800, or standard 10-12 digit format
+  const phonePattern = /(\+\d{1,3}[-.\s]?)?(\(?\d{2,5}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}[-.\s]?\d{3,4}/g;
   const matches = text.match(phonePattern) || [];
   
   matches.forEach(p => {
     const cleaned = p.trim();
     const digitsOnly = cleaned.replace(/\D/g, '');
-    // Filter out short strings that aren't real numbers (< 7 digits)
-    if (digitsOnly.length >= 7 && digitsOnly.length <= 15) {
-      phones.add(cleaned);
+    // Real phone numbers must be between 10 and 15 digits or start with +
+    if ((digitsOnly.length >= 10 && digitsOnly.length <= 15) || cleaned.startsWith('+')) {
+      if (!cleaned.includes('.jpg') && !cleaned.includes('.png') && !cleaned.includes('.webp')) {
+        phones.add(cleaned);
+      }
     }
   });
 
@@ -129,7 +131,8 @@ async function scrapeWithPlaywright(inputUrl) {
       youtube: homepageData.socials.youtube || secondaryPageData.socials.youtube || null,
       github: homepageData.socials.github || secondaryPageData.socials.github || null
     };
-    const aboutSnippet = homepageData.aboutSnippet || secondaryPageData.aboutSnippet || homepageData.description || '';
+    const mergedAddress = homepageData.address || secondaryPageData.address || '';
+    const mergedLegalName = homepageData.legalName || secondaryPageData.legalName || '';
 
     return {
       success: true,
@@ -137,6 +140,8 @@ async function scrapeWithPlaywright(inputUrl) {
         domain,
         url: targetUrl,
         title: homepageData.title || domain,
+        orgName: mergedLegalName || '',
+        address: mergedAddress,
         description: homepageData.description || aboutSnippet,
         aboutSnippet: aboutSnippet || `Platform operating at ${domain}`,
         headline: homepageData.headline || '',
@@ -171,6 +176,53 @@ async function extractPageIntelligence(page, domain) {
     // Headline (H1)
     const h1 = document.querySelector('h1');
     const headline = h1 ? h1.innerText.trim() : '';
+
+    // Extract JSON-LD Schemas (Organization / PostalAddress / LocalBusiness)
+    const jsonLdData = [];
+    let detectedAddress = '';
+    let detectedLegalName = '';
+
+    const jsonLdScripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+    jsonLdScripts.forEach(script => {
+      try {
+        const parsed = JSON.parse(script.innerText);
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        items.forEach(item => {
+          if (!item) return;
+          const itemType = String(item['@type'] || '');
+          if (itemType.includes('Organization') || itemType.includes('Business') || itemType.includes('Corporation') || itemType.includes('Place')) {
+            jsonLdData.push(item);
+            if (item.name) detectedLegalName = item.name;
+            if (item.legalName) detectedLegalName = item.legalName;
+
+            if (item.address) {
+              const addr = item.address;
+              if (typeof addr === 'string') {
+                detectedAddress = addr;
+              } else if (typeof addr === 'object') {
+                const parts = [addr.streetAddress, addr.addressLocality, addr.addressRegion, addr.postalCode, addr.addressCountry].filter(Boolean);
+                if (parts.length > 0) detectedAddress = parts.join(', ');
+              }
+            }
+          }
+        });
+      } catch (e) {
+        // Ignore invalid JSON-LD script blocks
+      }
+    });
+
+    // Extract Footer & Contact Address Elements from DOM
+    let footerAddressText = '';
+    const addressElements = Array.from(document.querySelectorAll('address, footer, [class*="footer"], [id*="footer"], [class*="contact"], [id*="contact"]'));
+    addressElements.forEach(el => {
+      const text = el.innerText || '';
+      // Look for street, city, postal code patterns in footer
+      if (!footerAddressText && text.length > 10 && text.length < 500) {
+        if (/(\d{5,6}|\b[A-Z]{1,2}\d[A-Z\d]? \d[A-Z]{2}\b|street|road|avenue|suite|floor|sector|block|inc\.|ltd\.|pvt\.|hq|headquarters|india|usa|uk|canada)/i.test(text)) {
+          footerAddressText = text.replace(/\s+/g, ' ').trim();
+        }
+      }
+    });
 
     // 1. Social Media Links from href attributes
     const socials = {
@@ -234,6 +286,8 @@ async function extractPageIntelligence(page, domain) {
       aboutSnippet,
       socials,
       fullText,
+      detectedAddress: detectedAddress || footerAddressText || '',
+      detectedLegalName,
       techStack: techStack.length > 0 ? techStack : ['Web Stack']
     };
   }, domain).then(res => {
@@ -247,6 +301,8 @@ async function extractPageIntelligence(page, domain) {
       headline: res.headline,
       aboutSnippet: res.aboutSnippet,
       socials: res.socials,
+      address: res.detectedAddress,
+      legalName: res.detectedLegalName,
       emails,
       phoneNumbers,
       techStack: res.techStack

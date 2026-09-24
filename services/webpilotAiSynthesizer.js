@@ -1,5 +1,26 @@
-const { profile } = require('console');
 const https = require('https');
+
+function normalizeLocationString(loc) {
+  if (!loc) return null;
+  if (typeof loc === 'string') return loc;
+  if (typeof loc === 'object') {
+    const parts = [
+      loc.address || loc.street || loc.cityState,
+      loc.city,
+      loc.state || loc.region,
+      loc.country || loc.granularity
+    ].filter(Boolean);
+    if (parts.length > 0) {
+      return Array.from(new Set(parts)).join(', ');
+    }
+    try {
+      return Object.values(loc).filter(v => typeof v === 'string' || typeof v === 'number').join(', ');
+    } catch {
+      return String(loc);
+    }
+  }
+  return String(loc);
+}
 
 /**
  * Multi-Provider AI Engine (Groq, OpenAI, Gemini & Heuristic Fallback)
@@ -9,15 +30,14 @@ const https = require('https');
 /**
  * Call Groq AI API with automatic model retry fallback
  */
-async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requestedModel = 'qwen/qwen3.8-27b') {
+async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requestedModel = 'openai/gpt-oss-20b') {
   const candidateModels = Array.from(new Set([
     requestedModel,
-    'qwen/qwen3.8-27b',
-    'allam-2-7b',
+    'openai/gpt-oss-20b',
     'openai/gpt-oss-120b',
-    'openai/gpt-oss-20b'
+    'qwen/qwen3.8-27b',
+    'allam-2-7b'
   ])).filter(Boolean);
-
 
   let lastError = null;
 
@@ -27,11 +47,11 @@ async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requested
         const postData = JSON.stringify({
           model,
           messages: [
-            { role: 'system', content: systemInstruction || 'You are an AI B2B Intelligence Analyst.' },
+            { role: 'system', content: systemInstruction || 'You are an AI B2B Intelligence Analyst. Return only valid JSON.' },
             { role: 'user', content: prompt }
           ],
           temperature: 0.2,
-          max_tokens: 2500
+          max_tokens: 600
         });
 
         const options = {
@@ -141,54 +161,85 @@ async function callOpenAI(prompt, systemInstruction = '', apiKey = '', model = '
 }
 
 /**
- * Call Gemini API (Gemini 1.5 Flash / Pro)
+ * Call Gemini API (Gemini 1.5 Flash / 2.0 Flash) with optional Google Search Grounding
  */
-async function callGeminiAI(prompt, systemInstruction = '', apiKey = '', model = 'gemini-1.5-flash') {
-  return new Promise((resolve, reject) => {
-    const postData = JSON.stringify({
-      contents: [{
-        parts: [{ text: `${systemInstruction}\n\nTask: ${prompt}` }]
-      }]
-    });
+async function callGeminiAI(prompt, systemInstruction = '', apiKey = '', requestedModel = 'gemini-2.5-flash', enableSearchGrounding = true, timeoutMs = 30000) {
+  const effectiveKey = apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!effectiveKey) {
+    throw new Error('No Gemini API key provided (set GEMINI_API_KEY or GOOGLE_API_KEY environment variable)');
+  }
 
-    const options = {
-      hostname: 'generativelanguage.googleapis.com',
-      path: `/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      },
-      timeout: 10000
-    };
+  const model = 'gemini-2.5-flash';
+  let lastErr = null;
 
-    const req = https.request(options, (res) => {
-      let raw = '';
-      res.on('data', (chunk) => raw += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(raw);
-          if (json.candidates && json.candidates[0] && json.candidates[0].content) {
-            const text = json.candidates[0].content.parts[0].text;
-            resolve(text);
-          } else {
-            reject(new Error('Gemini API error'));
-          }
-        } catch (e) {
-          reject(e);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const text = await new Promise((resolve, reject) => {
+        const payload = {
+          contents: [{
+            parts: [{ text: `${systemInstruction}\n\nTask: ${prompt}` }]
+          }]
+        };
+
+        if (enableSearchGrounding && attempt <= 2) {
+          payload.tools = [{ googleSearch: {} }];
         }
+
+        const postData = JSON.stringify(payload);
+
+        const options = {
+          hostname: 'generativelanguage.googleapis.com',
+          path: `/v1beta/models/${model}:generateContent?key=${effectiveKey}`,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData)
+          },
+          timeout: timeoutMs
+        };
+
+        const req = https.request(options, (res) => {
+          let raw = '';
+          res.on('data', (chunk) => raw += chunk);
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(raw);
+              if (json.candidates && json.candidates[0] && json.candidates[0].content) {
+                const parts = json.candidates[0].content.parts || [];
+                const resText = parts.map(p => p.text).filter(Boolean).join('\n');
+                resolve(resText);
+              } else if (json.error) {
+                reject(new Error(json.error.message || `Gemini API error (code ${json.error.code})`));
+              } else {
+                reject(new Error('Unexpected response structure from Gemini API'));
+              }
+            } catch (e) {
+              reject(e);
+            }
+          });
+        });
+
+        req.on('error', (err) => reject(err));
+        req.on('timeout', () => {
+          req.destroy();
+          reject(new Error('Gemini request timed out'));
+        });
+
+        req.write(postData);
+        req.end();
       });
-    });
 
-    req.on('error', (err) => reject(err));
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Gemini request timed out'));
-    });
+      return text;
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[Gemini AI] Attempt ${attempt}/3 notice: ${err.message}. Retrying...`);
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+      }
+    }
+  }
 
-    req.write(postData);
-    req.end();
-  });
+  throw lastErr || new Error('All Gemini attempts failed');
 }
 
 /**
@@ -208,22 +259,71 @@ function heuristicSynthesize(scrapedData) {
 
   let industry = 'Technology & Software';
   let subIndustry = 'Digital Platforms & Services';
-  let location = scrapedData.address || 'Global Operations';
+  const rawLocation = normalizeLocationString(scrapedData.address);
+  let location = '';
 
-  if (text.includes('beauty') || text.includes('salon') || text.includes('skincare') || text.includes('cosmetic') || text.includes('spa') || text.includes('hair') || text.includes('grooming') || text.includes('husn')) {
+  const fullText = `${scrapedData.orgName || ''} ${domain} ${scrapedData.title || ''} ${scrapedData.description || ''} ${scrapedData.headline || ''} ${scrapedData.fullContent || ''} ${scrapedData.aboutSnippet || ''}`.toLowerCase();
+  const phoneStr = (scrapedData.phoneNumbers || []).join(' ');
+
+  // Factual Regional / State / City Location Detection
+  if (fullText.includes('mohali')) {
+    location = 'Mohali, Punjab, India';
+  } else if (fullText.includes('chandigarh')) {
+    location = 'Chandigarh, Punjab, India';
+  } else if (fullText.includes('pune')) {
+    location = 'Pune, Maharashtra, India';
+  } else if (fullText.includes('mumbai')) {
+    location = 'Mumbai, Maharashtra, India';
+  } else if (fullText.includes('delhi') || fullText.includes('ncr') || fullText.includes('gurgaon') || fullText.includes('gurugram') || fullText.includes('noida')) {
+    location = 'Delhi NCR, India';
+  } else if (fullText.includes('bangalore') || fullText.includes('bengaluru')) {
+    location = 'Bengaluru, Karnataka, India';
+  } else if (fullText.includes('hyderabad')) {
+    location = 'Hyderabad, Telangana, India';
+  } else if (fullText.includes('chennai')) {
+    location = 'Chennai, Tamil Nadu, India';
+  } else if (fullText.includes('punjab')) {
+    location = 'Punjab, India';
+  } else if (fullText.includes('san francisco') || fullText.includes('silicon valley') || fullText.includes('bay area')) {
+    location = 'San Francisco, CA, USA';
+  } else if (fullText.includes('new york') || fullText.includes('nyc')) {
+    location = 'New York, NY, USA';
+  } else if (fullText.includes('london')) {
+    location = 'London, United Kingdom';
+  } else if (fullText.includes('toronto')) {
+    location = 'Toronto, Canada';
+  } else if (fullText.includes('berlin')) {
+    location = 'Berlin, Germany';
+  } else if (fullText.includes('sydney')) {
+    location = 'Sydney, Australia';
+  } else if (rawLocation && rawLocation !== 'Global Operations' && rawLocation !== 'Global') {
+    location = rawLocation;
+  } else if (domain.endsWith('.in') || domain.endsWith('.co.in') || fullText.includes('india') || fullText.includes('indian') || phoneStr.includes('+91')) {
+    location = 'India';
+  } else if (domain.endsWith('.uk') || domain.endsWith('.co.uk') || fullText.includes('united kingdom') || fullText.includes(' uk ')) {
+    location = 'United Kingdom';
+  } else if (domain.endsWith('.ca') || fullText.includes('canada')) {
+    location = 'Canada';
+  } else if (domain.endsWith('.de') || fullText.includes('germany')) {
+    location = 'Germany';
+  } else if (domain.endsWith('.au') || fullText.includes('australia')) {
+    location = 'Australia';
+  } else {
+    location = rawLocation || 'Global Operations';
+  }
+
+  if (text.includes('beauty') || text.includes('salon') || text.includes('skincare') || text.includes('cosmetic') || text.includes('spa') || text.includes('hair') || text.includes('grooming')) {
     industry = 'Beauty & Personal Care';
     subIndustry = 'Salon Services & Skincare E-Commerce';
-    if (text.includes('india') || text.includes('.in')) location = scrapedData.address || 'India Operations';
-  } else if (text.includes('uniportal') || text.includes('university') || text.includes('education') || text.includes('portal') || text.includes('college') || text.includes('student') || text.includes('.co.in') || text.includes('.edu') || text.includes('school')) {
+  } else if (text.includes('uniportal') || text.includes('university') || text.includes('education') || text.includes('portal') || text.includes('college') || text.includes('student') || text.includes('.edu') || text.includes('school')) {
     industry = 'Education Technology (EdTech) & Institutional Software';
     subIndustry = 'University & Higher Education Management Portal';
-    if (text.includes('.co.in') || text.includes('india')) {
-      location = scrapedData.address || 'India Operations';
-    }
-  } else if (text.includes('stripe') || text.includes('pay') || text.includes('fintech') || text.includes('bank') || text.includes('billing') || text.includes('payment') || text.includes('crypto') || text.includes('razorpay')) {
+  } else if (text.includes('stripe') || text.includes('pay') || text.includes('fintech') || text.includes('bank') || text.includes('billing') || text.includes('payment') || text.includes('razorpay')) {
     industry = 'Fintech & Financial Infrastructure';
     subIndustry = 'Payments, Banking APIs & Merchant Billing';
-    location = scrapedData.address || 'San Francisco, CA & Global';
+  } else if (text.includes('blockchain') || text.includes('web3') || text.includes('smart contract')) {
+    industry = 'Artificial Intelligence & Blockchain Development';
+    subIndustry = 'AI Automation, Smart Contracts & Web3 Platforms';
   } else if (text.includes('health') || text.includes('medical') || text.includes('clinic') || text.includes('doctor') || text.includes('pharma') || text.includes('hospital')) {
     industry = 'Healthcare & Life Sciences';
     subIndustry = 'Clinical Care & Digital Health Services';
@@ -231,30 +331,37 @@ function heuristicSynthesize(scrapedData) {
     industry = 'Retail & E-Commerce';
     subIndustry = 'Direct-to-Consumer & Online Commerce';
   } else if (text.includes('data') || text.includes('ai') || text.includes('ml') || text.includes('intelligence') || text.includes('llm')) {
-    industry = 'Artificial Intelligence & Data Systems';
-    subIndustry = 'AI Infrastructure, Vector Databases & Analytics';
-    location = scrapedData.address || 'San Francisco, CA';
+    industry = 'Artificial Intelligence & Software Engineering';
+    subIndustry = 'AI Automation, Custom Software & Analytics';
   } else if (text.includes('cyber') || text.includes('security') || text.includes('privacy') || text.includes('shield')) {
     industry = 'Cybersecurity & Data Governance';
     subIndustry = 'Cloud Security & Compliance Infrastructure';
-    location = scrapedData.address || 'San Francisco, CA';
   }
 
-  const tagline = scrapedData.headline || scrapedData.description || `Platform operating at ${domain}`;
-  const overview = scrapedData.description && scrapedData.description.length > 10
-    ? scrapedData.description
-    : `${name} is an established organization operating via ${domain}. The company provides services and solutions tailored for its customers.`;
+  const isJunkSnippet = (str) => !str || /(?:cell phone|landline|bio\s*\(|\(\d{3}\)\s*\d{3}-\d{4}.*\(|email\s+[a-z0-9._%+-]+@)/i.test(str);
+
+  let tagline = scrapedData.headline;
+  if (isJunkSnippet(tagline)) {
+    tagline = scrapedData.title && !isJunkSnippet(scrapedData.title) ? scrapedData.title : `${name} Official Company Profile`;
+  }
+
+  let overview = scrapedData.description;
+  if (isJunkSnippet(overview)) {
+    overview = scrapedData.aboutSnippet && !isJunkSnippet(scrapedData.aboutSnippet)
+      ? scrapedData.aboutSnippet
+      : `${name} is a technology and software organization operating via ${domain}, providing specialized digital services for its clients.`;
+  }
 
   return {
     name,
     domain,
     url: scrapedData.url || `https://${domain}`,
-    tagline,
-    overview,
+    tagline: tagline || `${name} Technology Platform`,
+    overview: overview || `${name} provides digital products and services via ${domain}.`,
     industry,
     subIndustry,
-    location,
-    emails: scrapedData.emails || [],
+    location: normalizeLocationString(location),
+    emails: (scrapedData.emails || []).filter(e => !isJunkSnippet(e)),
     phoneNumbers: scrapedData.phoneNumbers || [],
     socialMedia: scrapedData.socialMedia || {
       linkedin: null,
@@ -277,43 +384,58 @@ async function synthesizeCompanyProfile(scrapedData) {
   const provider = (process.env.AI_PROVIDER || 'groq').toLowerCase();
   const groqKey = process.env.GROQ_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
-  const geminiKey = process.env.GEMINI_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   const groqModel = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b';
 
   const heuristicProfile = heuristicSynthesize(scrapedData);
 
-  const systemPrompt = `You are an expert B2B Market Intelligence AI Analyst. Analyze the scraped website data and target organization name to return a highly accurate, professional company profile in valid JSON format:
+  const systemPrompt = `You are an expert B2B Market Intelligence AI Analyst. Analyze the scraped website data, domain, and search grounding context to return a highly accurate, professional company profile in valid JSON format:
 {
   "name": "Exact Official Company or Brand Name",
-  "tagline": "Clear, concise 1-sentence value proposition",
-  "overview": "Comprehensive 2-3 sentence company overview describing core products, services, target audience, and business model",
-  "industry": "Primary Industry Sector (e.g. Beauty & Personal Care, Education Technology, Fintech & Payments, Retail & E-Commerce, Healthcare)",
+  "tagline": "Clear, concise 1-sentence factual value proposition",
+  "overview": "Comprehensive 2-3 sentence overview describing core products, services, target audience, and business model",
+  "industry": "Primary Industry Sector",
   "subIndustry": "Specific Sub-Industry Niche",
-  "location": "Headquarters City, Country or Region"
+  "location": "Official Headquarters City, State, Country or Address (e.g. San Francisco, CA or Mohali, Punjab, India)",
+  "emails": ["official public email addresses if verified"],
+  "phoneNumbers": ["official phone numbers if verified"],
+  "socialMedia": {
+    "linkedin": "Official Company LinkedIn URL",
+    "twitter": "Official Twitter/X URL",
+    "facebook": "Official Facebook Page URL",
+    "instagram": "Official Instagram Handle URL"
+  },
+  "services": ["List of core services provided"]
 }
+CRITICAL RULE: DO NOT invent fake contact information. Ground location, emails, phone numbers, and LinkedIn URL strictly on the website DOM content or verified web search grounding.
 Return valid JSON only.`;
 
   const userPrompt = `Target Organization Name: ${scrapedData.orgName || scrapedData.title || scrapedData.domain}
 Scraped Domain: ${scrapedData.domain}
 Title: ${scrapedData.title}
-Description: ${scrapedData.description}
+Meta Description: ${scrapedData.description}
 Headline: ${scrapedData.headline}
-Address / Location: ${scrapedData.address || ''}`;
+About / Summary: ${scrapedData.aboutSnippet || ''}
+Scraped DOM Address / Footer / JSON-LD: ${scrapedData.address || 'None explicitly detected'}
+Scraped Emails: ${(scrapedData.emails || []).join(', ')}
+Scraped Phone Numbers: ${(scrapedData.phoneNumbers || []).join(', ')}
+Scraped Social Links: ${JSON.stringify(scrapedData.socialMedia || {})}
+Full Webpage Text: ${(scrapedData.fullContent || scrapedData.aboutSnippet || '').slice(0, 3000)}`;
 
   try {
     let aiText = '';
     let activeProvider = 'heuristic';
 
-    if ((provider === 'groq' || groqKey) && groqKey) {
+    if ((provider === 'gemini' || geminiKey) && geminiKey) {
+      activeProvider = 'gemini (1.5-flash search-grounded)';
+      aiText = await callGeminiAI(userPrompt, systemPrompt, geminiKey, 'gemini-1.5-flash', true);
+    } else if ((provider === 'groq' || groqKey) && groqKey) {
       const groqRes = await callGroqAI(userPrompt, systemPrompt, groqKey, groqModel);
       aiText = groqRes.text;
       activeProvider = `groq (${groqRes.usedModel})`;
     } else if ((provider === 'openai' || openaiKey) && openaiKey) {
       activeProvider = 'openai (gpt-4o-mini)';
       aiText = await callOpenAI(userPrompt, systemPrompt, openaiKey);
-    } else if ((provider === 'gemini' || geminiKey) && geminiKey) {
-      activeProvider = 'gemini (1.5-flash)';
-      aiText = await callGeminiAI(userPrompt, systemPrompt, geminiKey);
     } else {
       return heuristicProfile;
     }
@@ -321,6 +443,31 @@ Address / Location: ${scrapedData.address || ''}`;
     const jsonMatch = aiText.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
+
+      const mergedEmails = Array.from(new Set([
+        ...(parsed.emails || []),
+        ...(heuristicProfile.emails || [])
+      ])).filter(Boolean);
+
+      const mergedPhones = Array.from(new Set([
+        ...(parsed.phoneNumbers || []),
+        ...(heuristicProfile.phoneNumbers || [])
+      ])).filter(Boolean);
+
+      const mergedSocialMedia = {
+        linkedin: parsed.socialMedia?.linkedin || heuristicProfile.socialMedia?.linkedin || null,
+        twitter: parsed.socialMedia?.twitter || heuristicProfile.socialMedia?.twitter || null,
+        facebook: parsed.socialMedia?.facebook || heuristicProfile.socialMedia?.facebook || null,
+        instagram: parsed.socialMedia?.instagram || heuristicProfile.socialMedia?.instagram || null,
+        youtube: parsed.socialMedia?.youtube || heuristicProfile.socialMedia?.youtube || null,
+        github: parsed.socialMedia?.github || heuristicProfile.socialMedia?.github || null,
+      };
+
+      const parsedLoc = normalizeLocationString(parsed.location);
+      const locationToUse = (parsedLoc && parsedLoc !== 'Global Operations' && parsedLoc !== 'Global')
+        ? parsedLoc
+        : (heuristicProfile.location && heuristicProfile.location !== 'Global Operations' ? heuristicProfile.location : (parsedLoc || 'India'));
+
       return {
         ...heuristicProfile,
         name: parsed.name || heuristicProfile.name,
@@ -328,7 +475,11 @@ Address / Location: ${scrapedData.address || ''}`;
         overview: parsed.overview || heuristicProfile.overview,
         industry: parsed.industry || heuristicProfile.industry,
         subIndustry: parsed.subIndustry || heuristicProfile.subIndustry,
-        location: parsed.location || heuristicProfile.location,
+        location: locationToUse,
+        emails: mergedEmails,
+        phoneNumbers: mergedPhones,
+        socialMedia: mergedSocialMedia,
+        services: parsed.services || [],
         aiProvider: activeProvider,
         synthesizedAt: new Date().toISOString()
       };

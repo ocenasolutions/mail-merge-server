@@ -1,23 +1,207 @@
+const https = require('https');
 const { callGroqAI } = require('./webpilotAiSynthesizer');
 const { searchApolloPeople } = require('./apolloService');
 
 /**
+ * Live Google SERP API Search for Real-Time Competitor Discovery
+ */
+function cleanCompanyName(title, websiteOrDomain = '') {
+  if (!title && !websiteOrDomain) return 'Unknown Company';
+  let rawName = title ? title.trim() : '';
+
+  const seoPatterns = [
+    /top\s+\d*\s*alternatives\s+(?:and|&)\s*(?:strategic\s+)?competitors(?:\s+of|\s+for)?\s+(.+)/i,
+    /top\s+\d*\s*(.+?)\s+alternatives(?:,?\s*competitors)?/i,
+    /comparison\s+and\s+reviews\s+of\s+(.+?)(?:\s+competitors|\s+software)?$/i,
+    /(.+?)\s+alternatives\s+and\s+competitors/i,
+    /top\s+\d*\s+competitors\s+of\s+(.+)/i
+  ];
+
+  for (const pattern of seoPatterns) {
+    const match = rawName.match(pattern);
+    if (match && match[1]) {
+      let extracted = match[1].replace(/\(\d{4}\)/g, '').replace(/20\d\d/g, '').replace(/platform|software|system|services/gi, '').trim();
+      if (extracted.length >= 2 && extracted.length <= 35) {
+        return extracted;
+      }
+    }
+  }
+
+  let cleaned = rawName
+    .replace(/\s*[-|–—].*$/g, '')
+    .replace(/top\s+\d+\s+/gi, '')
+    .replace(/alternatives\s+and\s+competitors/gi, '')
+    .replace(/alternatives,?\s*competitors/gi, '')
+    .replace(/comparison\s+and\s+reviews\s+of/gi, '')
+    .replace(/software\s+competitors/gi, '')
+    .replace(/strategic\s+competitors/gi, '')
+    .replace(/\(20\d\d\)/g, '')
+    .trim();
+
+  if (cleaned.length > 35 || /reviews|alternatives|competitors|versus|\bvs\b/i.test(cleaned)) {
+    if (websiteOrDomain) {
+      try {
+        const dom = new URL(websiteOrDomain.startsWith('http') ? websiteOrDomain : `https://${websiteOrDomain}`).hostname
+          .replace(/^www\./, '')
+          .split('.')[0];
+        if (dom && dom.length > 2) {
+          return dom.charAt(0).toUpperCase() + dom.slice(1);
+        }
+      } catch (e) {}
+    }
+  }
+
+  return cleaned || 'Enterprise Company';
+}
+
+async function fetchSerpCompetitors(domain, industry = '', location = '') {
+  const cleanDomain = (domain || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/^www\./, '').trim();
+  if (!cleanDomain) return [];
+
+  const cleanLoc = (location || '').replace(/Global Operations|Global/gi, '').trim();
+  const isIndianDomain = cleanDomain.endsWith('.in') || cleanDomain.endsWith('.co.in');
+  const regionQuery = cleanLoc || (isIndianDomain ? 'India' : '');
+
+  let cleanInd = (industry || '').replace(/technology & software|technology|software & technology services|business services/gi, '').trim();
+
+  const query = `${cleanDomain} ${cleanInd} ${regionQuery ? `in ${regionQuery}` : ''} competitors alternatives`.replace(/\s+/g, ' ').trim();
+
+  function processOrganicResults(organicList) {
+    const competitors = [];
+    for (let i = 0; i < organicList.length; i++) {
+      const item = organicList[i];
+      const link = item.link || item.url;
+      if (!link) continue;
+      try {
+        const itemDomain = new URL(link).hostname.replace(/^www\./, '').toLowerCase();
+        // Ignore self, search engines, review platforms, social sites, news portals, and aggregators
+        if (itemDomain.includes(cleanDomain) || itemDomain.includes('google') || itemDomain.includes('wikipedia') || 
+            itemDomain.includes('youtube') || itemDomain.includes('linkedin') || itemDomain.includes('github') ||
+            itemDomain.includes('facebook.com') || itemDomain.includes('instagram.com') || itemDomain.includes('twitter.com') ||
+            itemDomain.includes('indiatimes.com') || itemDomain.includes('reddit.com') || itemDomain.includes('g2.com') ||
+            itemDomain.includes('clutch.co') || itemDomain.includes('capterra') || itemDomain.includes('trustpilot.com') ||
+            itemDomain.includes('quora.com') || itemDomain.includes('merriam-webster') || itemDomain.includes('britannica') ||
+            itemDomain.includes('npr.org') || itemDomain.includes('sciencedirect') || itemDomain.includes('.gov') || itemDomain.includes('.edu')) {
+          continue;
+        }
+
+        const name = cleanCompanyName(item.title, link) || itemDomain;
+        const isCompIndian = itemDomain.endsWith('.in') || itemDomain.endsWith('.co.in') || (item.snippet || '').toLowerCase().includes('india') || regionQuery.toLowerCase().includes('india');
+
+        const compLocation = isCompIndian
+          ? (regionQuery.toLowerCase().includes('india') && regionQuery.length > 4 ? regionQuery : 'India')
+          : (regionQuery || 'Global Operations');
+
+        competitors.push({
+          id: `serp-comp-${i}-${Date.now()}`,
+          name: name || itemDomain,
+          domain: itemDomain,
+          website: link,
+          industry: industry || 'Technology & Software Services',
+          subIndustry: 'Digital Solutions',
+          location: compLocation,
+          region: isCompIndian ? 'India & South Asia' : (regionQuery || 'Global'),
+          rivalType: i < 2 ? 'Local Direct Competitors' : i < 5 ? 'National Leaders' : 'International Market Leaders',
+          employeeCount: 250,
+          headcountRange: '50-500',
+          fundingStage: 'Scaled',
+          fundingAmount: 'N/A',
+          techStack: ['Web & Software Services'],
+          description: item.snippet || `Real competitor discovered in ${compLocation} via live Google Search query for ${cleanDomain}`,
+          matchScore: 95 - (i * 3),
+          matchedReasoning: `Discovered via live Google SERP Search for ${cleanDomain} in region (${compLocation}). Snippet: "${(item.snippet || '').slice(0, 100)}..."`,
+          contacts: [],
+          primaryContact: null,
+          emails: []
+        });
+      } catch (e) {}
+    }
+    return competitors;
+  }
+
+  // 1. Try google.serper.dev if SERPER_API_KEY is configured
+  const serperKey = process.env.SERPER_API_KEY;
+  if (serperKey) {
+    try {
+      const postData = JSON.stringify({ q: query, num: 10 });
+      const serperRes = await new Promise((resolve, reject) => {
+        const req = https.request({
+          hostname: 'google.serper.dev',
+          path: '/search',
+          method: 'POST',
+          headers: {
+            'X-API-KEY': serperKey,
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData)
+          },
+          timeout: 8000
+        }, (res) => {
+          let raw = '';
+          res.on('data', chunk => raw += chunk);
+          res.on('end', () => {
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              try { resolve(JSON.parse(raw)); } catch (e) { reject(e); }
+            } else {
+              reject(new Error(`Serper HTTP ${res.statusCode}`));
+            }
+          });
+        });
+        req.on('error', err => reject(err));
+        req.write(postData);
+        req.end();
+      });
+
+      const competitors = processOrganicResults(serperRes.organic || []);
+      if (competitors.length > 0) return competitors.slice(0, 8);
+    } catch (err) {
+      console.warn(`[SERP Live Competitor Search] Serper.dev notice (${err.message}). Trying SerpApi fallback...`);
+    }
+  }
+
+  // 2. Fallback to SerpApi.com if SERPAPI_KEY is configured
+  const serpApiKey = process.env.SERPAPI_KEY || process.env.SERPER_API_KEY;
+  if (serpApiKey) {
+    try {
+      const serpUrl = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${serpApiKey}`;
+      const serpRes = await new Promise((resolve, reject) => {
+        https.get(serpUrl, { timeout: 8000 }, (res) => {
+          let raw = '';
+          res.on('data', chunk => raw += chunk);
+          res.on('end', () => {
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              try { resolve(JSON.parse(raw)); } catch (e) { reject(e); }
+            } else {
+              reject(new Error(`SerpApi HTTP ${res.statusCode}`));
+            }
+          });
+        }).on('error', reject);
+      });
+
+      const competitors = processOrganicResults(serpRes.organic_results || []);
+      if (competitors.length > 0) return competitors.slice(0, 8);
+    } catch (err) {
+      console.warn(`[SERP Live Competitor Search] SerpApi.com notice (${err.message}).`);
+    }
+  }
+
+  return [];
+}
+
+/**
  * Real-Time Dynamic Competitor Intelligence Engine
- * Dynamically discovers actual real-world competitors via Groq AI & Apollo API.
- * NO static or hardcoded competitor datasets.
  */
 
 function analyzeIndustrySector(scrapedData = {}) {
   const domain = scrapedData.domain || '';
   const title = scrapedData.title || domain;
   const desc = scrapedData.description || scrapedData.aboutSnippet || '';
-  const location = scrapedData.address || scrapedData.location || 'Global';
+  const location = scrapedData.location || scrapedData.address || 'India';
 
   return {
     industry: scrapedData.industry || 'Technology & Software',
     subIndustry: scrapedData.subIndustry || 'Enterprise Solutions',
     location: location,
-    region: 'Global',
+    region: location.includes('India') ? 'India & South Asia' : 'Global',
     competitors: []
   };
 }
@@ -27,7 +211,7 @@ function generateICPProfile(scrapedData = {}, sectorInfo = {}) {
   const industry = sectorInfo.industry || scrapedData.industry || 'Technology';
   
   return {
-    targetBuyerPersona: `Executive Decision Makers & Department Heads in ${industry}`,
+    targetBuyerPersona: `Target Buyers & Decision Makers in ${industry}`,
     idealCompanySize: "50 - 1,000 Staff",
     locationDetails: {
       cityState: sectorInfo.location || 'Global',
@@ -108,13 +292,18 @@ function processCompetitorAnalysis(scrapedData = {}) {
   };
 }
 
-async function processCompetitorAnalysisAsync(scrapedData = {}) {
+async function processCompetitorAnalysisAsync(scrapedData = {}, targetFilters = {}) {
   const domain = (scrapedData.domain || '').toLowerCase().trim();
   const groqApiKey = process.env.GROQ_API_KEY || '';
 
   if (groqApiKey && domain) {
     try {
+      const requestedRegion = targetFilters.targetRegion || targetFilters.location || '';
+      const requestedSize = targetFilters.companySize || targetFilters.headcount || '';
+      const requestedRole = targetFilters.targetRole || '';
+
       const isIndian = domain.endsWith('.in') || domain.endsWith('.co.in') ||
+        (requestedRegion && (requestedRegion.toLowerCase().includes('india') || requestedRegion.toLowerCase().includes('mohali') || requestedRegion.toLowerCase().includes('chandigarh') || requestedRegion.toLowerCase().includes('punjab') || requestedRegion.toLowerCase().includes('pune') || requestedRegion.toLowerCase().includes('delhi') || requestedRegion.toLowerCase().includes('bangalore') || requestedRegion.toLowerCase().includes('mumbai') || requestedRegion.toLowerCase().includes('hyderabad'))) ||
         (scrapedData.orgName && scrapedData.orgName.toLowerCase().includes('india')) ||
         (scrapedData.phoneNumbers && scrapedData.phoneNumbers.some(p => p.includes('+91'))) ||
         (scrapedData.address && scrapedData.address.toLowerCase().includes('india')) ||
@@ -122,25 +311,35 @@ async function processCompetitorAnalysisAsync(scrapedData = {}) {
 
       const targetOrgName = scrapedData.orgName || scrapedData.title || domain;
 
-      const prompt = `Perform a real-time market competitor intelligence analysis for the following company/website:
+      const userTargetingDirective = `
+USER SPECIFIED TARGET AUDIENCE DIRECTIVES:
+${requestedRegion && requestedRegion !== 'All' && requestedRegion !== 'India (All)' && requestedRegion !== 'Global' ? `- Target Location / Region: MUST prioritize real companies based in or operating heavily in "${requestedRegion}" (e.g. Punjab, Pune, Delhi-NCR, Bangalore, Mumbai, Hyderabad).` : ''}
+${requestedSize && requestedSize !== 'All' && requestedSize !== 'All Sizes' ? `- Target Company Staff Size: MUST prioritize companies with headcount around "${requestedSize}" employees.` : ''}
+${requestedRole && requestedRole !== 'All Decision Makers' ? `- Target Buyer Decision Maker Role: Focus on "${requestedRole}".` : ''}`;
+
+      const prompt = `Perform a real-time market competitor & target buyer intelligence analysis for the following company/website:
 Target Company / Brand Name: ${targetOrgName}
 Domain: ${domain}
 Title: ${scrapedData.title || domain}
 Description / Content: ${scrapedData.aboutSnippet || scrapedData.description || scrapedData.headline || ''}
+Full Scraped Web Content: ${(scrapedData.fullContent || '').slice(0, 3000)}
 Location / Phone: ${scrapedData.address || scrapedData.location || 'Global'} / ${scrapedData.phoneNumbers ? scrapedData.phoneNumbers.join(', ') : ''}
 Detected Origin: ${isIndian ? 'India / South Asia' : 'Global'}
+${userTargetingDirective}
 
 IMPORTANT REGIONAL & LOCATION DIRECTIVE:
-${isIndian ? `This target company (${targetOrgName}) operates in India. You MUST discover at least 3-4 Direct Indian Regional Competitors (HQ in Indian tech hubs like Bengaluru, Mumbai, Delhi-NCR, Pune, Hyderabad, etc.) currently operating in India, in addition to top global leaders.` : `Discover both regional competitors and top global market leaders for ${targetOrgName}.`}
+${requestedRegion && requestedRegion !== 'All' && requestedRegion !== 'India (All)' && requestedRegion !== 'Global'
+  ? `The user specifically requested targets in region: "${requestedRegion}". You MUST discover 5 REAL Competitor Companies and 5 REAL ICP Target Buyer Accounts headquartered or operating in "${requestedRegion}" (or South Asia region).`
+  : (isIndian ? `This target company (${targetOrgName}) operates in India. You MUST discover at least 3-4 Direct Indian Regional Competitors (HQ in Indian tech hubs like Bengaluru, Mumbai, Delhi-NCR, Pune, Punjab, Hyderabad, etc.) currently operating in India, in addition to top global leaders.` : `Discover both regional competitors and top global market leaders for ${targetOrgName}.`)}
 
 Analyze this company and return strictly valid JSON matching this schema:
 {
   "industry": "Primary Industry Name",
   "subIndustry": "Specific Niche / Sub-Industry",
-  "location": "${isIndian ? 'City, State, India' : 'Company HQ Location'}",
-  "region": "${isIndian ? 'India & South Asia' : 'Primary Region'}",
+  "location": "${requestedRegion || (isIndian ? 'City, State, India' : 'Company HQ Location')}",
+  "region": "${requestedRegion || (isIndian ? 'India & South Asia' : 'Primary Region')}",
   "targetBuyerPersona": "Description of Ideal Target Buyer Persona who needs ${targetOrgName}'s products/services",
-  "idealCompanySize": "Ideal Target Staff Range",
+  "idealCompanySize": "${requestedSize || 'Ideal Target Staff Range'}",
   "keyPainPoints": ["Pain point 1", "Pain point 2", "Pain point 3"],
   "decisionMakerRoles": ["Role 1", "Role 2", "Role 3"],
   "competitors": [
@@ -149,11 +348,11 @@ Analyze this company and return strictly valid JSON matching this schema:
       "domain": "competitordomain.com",
       "industry": "Industry",
       "subIndustry": "Sub Industry",
-      "location": "City, State, India (or Country)",
+      "location": "City, Region, Country",
       "region": "India & South Asia (or Global)",
-      "rivalType": "Direct Regional Rival (India) or Top Global Leader",
+      "rivalType": "Direct Regional Rival or Top Global Leader",
       "employeeCount": 250,
-      "headcountRange": "100-500",
+      "headcountRange": "${requestedSize || '100-500'}",
       "fundingStage": "Series A / Scaled / Public",
       "fundingAmount": "$10M",
       "techStack": ["React", "Node.js", "AWS"],
@@ -166,9 +365,9 @@ Analyze this company and return strictly valid JSON matching this schema:
       "domain": "buyerdomain.com",
       "industry": "Industry of Buyer Account",
       "subIndustry": "Niche of Buyer Account",
-      "location": "City, State, India (or Country)",
+      "location": "City, Region, Country",
       "region": "India & South Asia (or Global)",
-      "targetRole": "Decision Maker Title (e.g. CTO, Head of Procurement, Facilities Director, Founder)",
+      "targetRole": "${requestedRole || 'Decision Maker Title (e.g. CTO, Head of Procurement, Facilities Director, Founder)'}",
       "whyTheyBuy": "Specific business reason why this customer account needs ${targetOrgName}'s solutions"
     }
   ]
@@ -207,27 +406,15 @@ Identify 5 REAL direct competitor companies AND 5 REAL target customer buyer acc
                 const score = 98 - (idx * 3);
                 const reasoning = `${comp.rivalType || 'Direct Market Rival'}: Real-time market competitor of ${domain} in ${parsed.subIndustry || parsed.industry}. HQ: ${comp.location || 'Global'}.`;
 
-                const contactsList = apolloContacts.length > 0
-                  ? apolloContacts.map((c, cIdx) => ({
-                      id: `apollo-comp-cnt-${idx}-${cIdx}`,
-                      name: c.name,
-                      title: c.title,
-                      email: c.email,
-                      linkedin: c.linkedin || '',
-                      verified: c.verified,
-                      score: c.confidenceScore || 95
-                    }))
-                  : [
-                      {
-                        id: `cnt-comp-${idx}-1`,
-                        name: `${(comp.name || compDomain).split(' ')[0]} Executive`,
-                        title: "Decision Maker",
-                        email: `contact@${compDomain || 'competitor.com'}`,
-                        linkedin: `https://linkedin.com/company/${(compDomain || 'competitor').split('.')[0]}`,
-                        verified: true,
-                        score: 95
-                      }
-                    ];
+                const contactsList = apolloContacts.map((c, cIdx) => ({
+                  id: `apollo-comp-cnt-${idx}-${cIdx}`,
+                  name: c.name,
+                  title: c.title,
+                  email: c.email,
+                  linkedin: c.linkedin || '',
+                  verified: c.verified,
+                  score: c.confidenceScore || 95
+                }));
 
                 return {
                   id: `comp-realtime-${idx}-${Date.now()}`,
@@ -248,8 +435,8 @@ Identify 5 REAL direct competitor companies AND 5 REAL target customer buyer acc
                   matchScore: score,
                   matchedReasoning: reasoning,
                   contacts: contactsList,
-                  primaryContact: contactsList[0],
-                  emails: [contactsList[0].email]
+                  primaryContact: contactsList[0] || null,
+                  emails: contactsList.length > 0 && contactsList[0].email ? [contactsList[0].email] : []
                 };
               })
             );
@@ -257,9 +444,7 @@ Identify 5 REAL direct competitor companies AND 5 REAL target customer buyer acc
             // 2. Enrich each ICP Target Buyer Account (Prospective Client) with Apollo API real contacts
             const rawBuyerAccounts = (parsed.icpTargetBuyerAccounts && Array.isArray(parsed.icpTargetBuyerAccounts) && parsed.icpTargetBuyerAccounts.length > 0)
               ? parsed.icpTargetBuyerAccounts
-              : [
-                  { name: 'Target Enterprise Buyer', domain: 'targetclient.com', industry: parsed.industry, location: isIndian ? 'Bengaluru, India' : 'Global', targetRole: 'CTO / Head of Operations', whyTheyBuy: `Requires solutions aligned with ${targetOrgName}'s offering.` }
-                ];
+              : [];
 
             const enrichedIcpBuyerLeads = await Promise.all(
               rawBuyerAccounts.map(async (buyer, idx) => {
@@ -284,27 +469,15 @@ Identify 5 REAL direct competitor companies AND 5 REAL target customer buyer acc
                 const score = 97 - (idx * 3);
                 const reasoning = `ICP Target Buyer Account: ${buyer.name} matches ideal customer profile for ${targetOrgName}. ${buyer.whyTheyBuy || 'Propensity to acquire services.'}`;
 
-                const contactsList = apolloContacts.length > 0
-                  ? apolloContacts.map((c, cIdx) => ({
-                      id: `apollo-icp-cnt-${idx}-${cIdx}`,
-                      name: c.name,
-                      title: c.title,
-                      email: c.email,
-                      linkedin: c.linkedin || '',
-                      verified: c.verified,
-                      score: c.confidenceScore || 95
-                    }))
-                  : [
-                      {
-                        id: `cnt-icp-${idx}-1`,
-                        name: `${(buyer.name || buyerDomain).split(' ')[0]} Executive`,
-                        title: buyer.targetRole || "Decision Maker",
-                        email: `contact@${buyerDomain || 'buyeraccount.com'}`,
-                        linkedin: `https://linkedin.com/company/${(buyerDomain || 'buyer').split('.')[0]}`,
-                        verified: true,
-                        score: 95
-                      }
-                    ];
+                const contactsList = apolloContacts.map((c, cIdx) => ({
+                  id: `apollo-icp-cnt-${idx}-${cIdx}`,
+                  name: c.name,
+                  title: c.title,
+                  email: c.email,
+                  linkedin: c.linkedin || '',
+                  verified: c.verified,
+                  score: c.confidenceScore || 95
+                }));
 
                 return {
                   id: `icp-realtime-${idx}-${Date.now()}`,
@@ -327,8 +500,8 @@ Identify 5 REAL direct competitor companies AND 5 REAL target customer buyer acc
                   matchedReasoning: reasoning,
                   isIcpLead: true,
                   contacts: contactsList,
-                  primaryContact: contactsList[0],
-                  emails: [contactsList[0].email]
+                  primaryContact: contactsList[0] || null,
+                  emails: contactsList.length > 0 && contactsList[0].email ? [contactsList[0].email] : []
                 };
               })
             );
@@ -403,11 +576,26 @@ Identify 5 REAL direct competitor companies AND 5 REAL target customer buyer acc
         }
       }
     } catch (err) {
-      console.warn(`Real-time AI Competitor Discovery notice (${err.message}).`);
+      console.warn(`Real-time AI Competitor Discovery notice (${err.message}). Trying Google SERP API search fallback...`);
+    }
+
+    // Google SERP Search Fallback for 100% Real Live Competitors
+    const serpCompetitors = await fetchSerpCompetitors(domain, scrapedData.industry, scrapedData.location);
+    if (serpCompetitors.length > 0) {
+      const baseResult = processCompetitorAnalysis(scrapedData);
+      return {
+        ...baseResult,
+        competitorLeads: serpCompetitors
+      };
     }
   }
 
-  return processCompetitorAnalysis(scrapedData);
+  const serpCompetitors = await fetchSerpCompetitors(domain, scrapedData.industry, scrapedData.location);
+  const baseResult = processCompetitorAnalysis(scrapedData);
+  return {
+    ...baseResult,
+    competitorLeads: serpCompetitors
+  };
 }
 
 module.exports = {

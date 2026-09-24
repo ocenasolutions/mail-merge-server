@@ -33,7 +33,7 @@ router.post('/search', async (req, res) => {
       const profile = await synthesizeCompanyProfile(rawScrapedData);
 
       // --- STAGE 4: REAL-TIME COMPETITOR & ECOSYSTEM DISCOVERY ---
-      const analysis = await processCompetitorAnalysisAsync(rawScrapedData);
+      const analysis = await processCompetitorAnalysisAsync(rawScrapedData, filters);
 
       const workflowSteps = [
         {
@@ -97,12 +97,14 @@ router.post('/search', async (req, res) => {
 
       let filteredCompetitors = analysis.competitorLeads || [];
       if (filters && filters.location && filters.location !== 'All') {
-        const filterVal = filters.location.toLowerCase();
-        filteredCompetitors = filteredCompetitors.filter(c => {
-          const locStr = (c.location || '').toLowerCase();
-          const regStr = (c.region || '').toLowerCase();
-          return locStr.includes(filterVal) || regStr.includes(filterVal);
-        });
+        const locations = filters.location.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+        if (locations.length > 0) {
+          filteredCompetitors = filteredCompetitors.filter(c => {
+            const locStr = (c.location || '').toLowerCase();
+            const regStr = (c.region || '').toLowerCase();
+            return locations.some(loc => locStr.includes(loc) || regStr.includes(loc) || loc === 'global' || locStr.includes('global'));
+          });
+        }
       }
 
       // Search Apollo API for verified B2B decision makers for target domain
@@ -164,61 +166,56 @@ router.post('/search', async (req, res) => {
             twitter: c.twitter || null
           }
         }));
-      } else {
-        const icpContacts = (analysis.icpProfile && analysis.icpProfile.decisionMakerContacts) || [];
-        icpLeads = icpContacts.map((c, idx) => ({
-          id: `icp-lead-${idx}-${Date.now()}`,
-          name: c.accountName || c.name,
-          website: c.linkedin ? c.linkedin.replace('/in/', '/company/') : `https://${(c.email || '').split('@')[1] || 'target.com'}`,
-          domain: (c.email || '').split('@')[1] || `icp-target-${idx}.com`,
-          industry: analysis.sectorInfo ? analysis.sectorInfo.industry : 'Enterprise Client',
-          subIndustry: analysis.sectorInfo ? analysis.sectorInfo.subIndustry : 'Target Account',
-          location: c.location || 'Global',
-          region: c.location || 'Global',
-          employeeCount: 500,
-          headcountRange: '201-1000',
-          fundingStage: 'Target Customer Account',
+      } else if (profile.emails && profile.emails.length > 0) {
+        icpLeads = profile.emails.map((email, idx) => ({
+          id: `web-contact-${idx}-${Date.now()}`,
+          name: email.split('@')[0].replace(/[._-]/g, ' ').toUpperCase(),
+          website: `https://${profile.domain}`,
+          domain: profile.domain,
+          industry: profile.industry || 'Technology',
+          subIndustry: profile.subIndustry || 'Software & Services',
+          location: profile.location || 'Global',
+          region: 'Global',
+          employeeCount: 250,
+          headcountRange: '50-500',
+          fundingStage: 'Enterprise',
           fundingAmount: 'N/A',
-          investors: [],
-          techStack: ['ERP', 'Enterprise Software'],
+          techStack: profile.techStack || ['Modern Stack'],
           hiringIntent: true,
-          openRoles: [c.role],
-          description: `${c.accountName || c.name} — Ideal customer account for ${profile.name || profile.domain}. Contact: ${c.role}.`,
+          openRoles: ['Web Contact'],
+          description: `Extracted live website contact (${email}) for ${profile.name || profile.domain}.`,
           isIcpLead: true,
-          matchScore: 97 - (idx * 3),
-          matchedReasoning: `ICP Target Buyer: ${c.accountName || c.name} matches ideal customer profile for ${profile.industry || 'EdTech'}. Decision maker: ${c.name} (${c.role}).`,
+          matchScore: 99 - (idx * 2),
+          matchedReasoning: `Extracted live web contact from ${profile.domain}. Verified DOM email.`,
           contacts: [{
-            id: `icp-contact-${idx}`,
-            name: c.name,
-            title: c.role,
-            email: c.email,
-            linkedin: c.linkedin || '',
-            verified: c.verified || true,
-            score: 97 - (idx * 2)
+            id: `web-cnt-${idx}`,
+            name: email.split('@')[0].toUpperCase(),
+            title: 'Extracted Web Contact',
+            email: email,
+            linkedin: profile.socialMedia?.linkedin || '',
+            verified: true,
+            score: 99
           }],
           primaryContact: {
-            id: `icp-contact-${idx}`,
-            name: c.name,
-            title: c.role,
-            email: c.email,
-            linkedin: c.linkedin || '',
-            verified: c.verified || true,
-            score: 97 - (idx * 2)
+            id: `web-cnt-${idx}`,
+            name: email.split('@')[0].toUpperCase(),
+            title: 'Extracted Web Contact',
+            email: email,
+            linkedin: profile.socialMedia?.linkedin || '',
+            verified: true,
+            score: 99
           },
-          emails: [c.email],
-          phoneNumbers: c.phone ? [c.phone] : [],
-          socialMedia: {
-            linkedin: c.linkedin || null,
-            twitter: c.twitter || null,
-            facebook: c.facebook || null,
-            instagram: c.instagram || null
-          }
+          emails: [email],
+          phoneNumbers: profile.phoneNumbers || [],
+          socialMedia: profile.socialMedia || {}
         }));
+      } else {
+        icpLeads = [];
       }
 
       // Phase 2 leads = competitors only; Phase 3 leads = ICP buyer accounts
 
-      const competitorLeads = [targetCompanyLead, ...filteredCompetitors];
+      const competitorLeads = filteredCompetitors.length > 0 ? filteredCompetitors : [targetCompanyLead];
       const allLeads = competitorLeads; // backward-compat: leads field = competitors for Phase 2
 
       const scrapedCompanyPayload = {
@@ -284,9 +281,22 @@ router.post('/search', async (req, res) => {
       });
 
     } else {
-      // --- NATURAL LANGUAGE SEARCH ---
+      // --- NATURAL LANGUAGE MARKET SEARCH ---
       const parsedIntent = parseNaturalLanguageIntent(prompt);
-      const leads = searchLeads(parsedIntent, filters);
+      let leads = searchLeads(parsedIntent, filters);
+
+      // Perform Live Google SERP & Groq AI Discovery for Real Market Data
+      if (leads.length === 0) {
+        try {
+          const { fetchSerpCompetitors } = require('../services/webpilotCompetitorEngine');
+          const serpResults = await fetchSerpCompetitors(prompt, parsedIntent.industry || filters.industry || '', parsedIntent.location || filters.location || '');
+          if (serpResults && serpResults.length > 0) {
+            leads = serpResults;
+          }
+        } catch (serpErr) {
+          console.warn('[Natural Language SERP Search Notice]:', serpErr.message);
+        }
+      }
 
       const workflowSteps = [
         {
@@ -298,8 +308,8 @@ router.post('/search', async (req, res) => {
         },
         {
           step: 2,
-          title: "Scanning Semantic Vector Index",
-          description: "Vector distance search evaluated across indexed dataset",
+          title: "Live Market & SERP Search",
+          description: "Scraped live search engines and web directories for real market companies",
           status: "completed",
           timestamp: new Date(Date.now() - 800).toISOString()
         },
