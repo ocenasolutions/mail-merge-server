@@ -234,6 +234,20 @@ async function fetchHttpFallbackData(targetUrl, domain) {
   });
 }
 
+function cleanMarkdownToPlainText(raw) {
+  if (!raw) return '';
+  return raw
+    .replace(/!\[.*?\]\(.*?\)/g, '') // strip images
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // convert markdown links to text
+    .replace(/\[\s*\]/g, '') // empty brackets
+    .replace(/\[\[+|\]\]+/g, ' ') // leftover multi brackets
+    .replace(/\[|\]/g, ' ') // single brackets
+    .replace(/https?:\/\/\S+/g, '') // raw urls
+    .replace(/[#*`_~|]/g, ' ') // markdown formatting symbols
+    .replace(/\s+/g, ' ') // normalize whitespace
+    .trim();
+}
+
 /**
  * High-Fidelity Third-Party Reader API Scraper (Jina AI Reader)
  * Bypasses SPA hydration limits & Anti-Bot protections, extracting structured Markdown text
@@ -257,7 +271,7 @@ async function fetchJinaReaderData(targetUrl, domain) {
             const data = json.data;
             const content = data.content || '';
             const title = data.title || domain;
-            const description = data.description || '';
+            const rawDescription = data.description || '';
 
             // Extract emails from markdown content
             const emailRegex = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
@@ -299,24 +313,37 @@ async function fetchJinaReaderData(targetUrl, domain) {
               github: (content.match(/https?:\/\/(www\.)?github\.com\/[a-zA-Z0-9._-]+/i) || [])[0] || null
             };
 
-            // Extract high quality about snippet
-            let aboutSnippet = description;
-            if (!aboutSnippet || aboutSnippet.length < 20) {
-              const paragraphs = content.split('\n\n').filter(p => p.trim().length > 40 && !p.startsWith('![Image'));
-              aboutSnippet = paragraphs[0] ? paragraphs[0].replace(/\[.*?\]\(.*?\)/g, '').trim() : content.slice(0, 300);
+            // Extract clean high quality about snippet and description
+            const cleanedDesc = cleanMarkdownToPlainText(rawDescription);
+            let aboutSnippet = cleanedDesc;
+
+            const paragraphs = content.split(/\n\s*\n/)
+              .map(p => cleanMarkdownToPlainText(p))
+              .filter(p => {
+                if (!p || p.length < 35) return false;
+                // Ignore pure navigation text or image captions
+                if (/^(home|about|contact|menu|top courses|sign in|login|book a meeting)/i.test(p) && p.length < 80) return false;
+                if (/^image \d+/i.test(p)) return false;
+                return true;
+              });
+
+            if (!aboutSnippet || aboutSnippet.length < 30 || aboutSnippet.includes('http')) {
+              aboutSnippet = paragraphs[0] || `${title} provides professional institutional services via ${domain}.`;
             }
+
+            const cleanTitle = cleanMarkdownToPlainText(title).replace(/^image \d+:\s*/i, '').trim() || domain;
 
             resolve({
               domain,
               url: targetUrl,
-              title,
-              description: description || aboutSnippet,
+              title: cleanTitle,
+              description: aboutSnippet.slice(0, 400),
               aboutSnippet: aboutSnippet.slice(0, 500),
-              headline: title,
+              headline: cleanTitle,
               emails: validEmails,
               phoneNumbers: Array.from(phones).slice(0, 5),
               socialMedia: socials,
-              fullMarkdown: content.slice(0, 4000),
+              fullMarkdown: cleanMarkdownToPlainText(content).slice(0, 4000),
               techStack: ['Jina AI Reader'],
               source: 'jina_ai_reader',
               scrapedAt: new Date().toISOString()

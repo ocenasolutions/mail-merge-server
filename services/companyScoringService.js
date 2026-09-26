@@ -1,7 +1,7 @@
 const { callGroqAI, callGeminiAI, callOpenAI } = require('./webpilotAiSynthesizer');
 
 /**
- * Transparent Weighted Competitor Scoring Engine
+ * Transparent Weighted Competitor Scoring Engine (Domain-Aware)
  */
 function scoreCompetitorHeuristic(candidate, targetCompany, radiusKm = 25) {
   let locationScore = 0;
@@ -12,10 +12,15 @@ function scoreCompetitorHeuristic(candidate, targetCompany, radiusKm = 25) {
   const reasons = [];
 
   const distanceKm = candidate.distanceKm;
-  const targetIndustry = (targetCompany.industry || 'Software Development').toLowerCase();
+  const targetIndustry = (targetCompany.industry || 'Business Services').toLowerCase();
+  const targetCategory = (targetCompany.category || '').toLowerCase();
   const candidateCategory = (candidate.category || '').toLowerCase();
   const candidateName = (candidate.name || '').toLowerCase();
-  const targetServices = (targetCompany.services || ['Web Development', 'Mobile App Development', 'UI/UX']).map(s => s.toLowerCase());
+  const targetServices = (targetCompany.services || []).map(s => s.toLowerCase());
+
+  const isEducationTarget = /education|admission|university|college|student|recruitment|counseling|study abroad/i.test(`${targetIndustry} ${targetCategory} ${targetServices.join(' ')}`);
+  const isTechTarget = /software|it|web|mobile|tech|app|digital|saas|ai|cloud/i.test(`${targetIndustry} ${targetCategory} ${targetServices.join(' ')}`);
+  const isFintechTarget = /fintech|pay|bank|financial|credit|billing/i.test(`${targetIndustry} ${targetCategory} ${targetServices.join(' ')}`);
 
   // 1. Location Similarity (20%)
   if (distanceKm != null) {
@@ -26,65 +31,58 @@ function scoreCompetitorHeuristic(candidate, targetCompany, radiusKm = 25) {
       locationScore = Math.max(40, Math.round(100 - (distanceKm / radiusKm) * 60));
       reasons.push(`Located within ${distanceKm} km of target company`);
     } else {
-      locationScore = 20;
+      locationScore = 30;
     }
   } else {
     locationScore = 50;
   }
 
-  // 2. Industry Similarity (25%)
-  const isDirectTech = candidate.candidateType === 'competitor' ||
-                       /software|it|web|mobile|tech|app|digital|saas|agency/i.test(candidateCategory) ||
-                       /infotech|technologies|solutions|software|systems|labs/i.test(candidateName);
-
-  if (isDirectTech) {
-    industryScore = 95;
-    reasons.push(`Operates in the same ${targetCompany.industry || 'Software & IT Solutions'} industry`);
-  } else {
-    industryScore = 25;
-  }
-
-  // 3. Service Overlap (30%)
-  let matchedServicesCount = 0;
-  const candidateServices = candidate.services || [];
-  const candidateText = `${candidateCategory} ${candidateName} ${candidateServices.join(' ')}`.toLowerCase();
-
-  targetServices.forEach(srv => {
-    if (candidateText.includes(srv) || srv.split(' ').some(w => w.length > 3 && candidateText.includes(w))) {
-      matchedServicesCount++;
+  // 2. Industry & Service Overlap (Domain-Aware)
+  if (isEducationTarget) {
+    const isEducationCompetitor = /education|admission|counseling|recruitment|college|university|student|career|edtech|study abroad|guidance|advisory/i.test(`${candidateCategory} ${candidateName}`);
+    if (isEducationCompetitor) {
+      industryScore = 95;
+      serviceScore = 90;
+      targetMarketScore = 90;
+      reasons.push(`Directly operates higher education admissions, counseling & student referral services`);
+      reasons.push(`Competes for the same student applicant pool and institutional university tie-ups`);
+    } else {
+      industryScore = 20;
+      serviceScore = 20;
+      targetMarketScore = 20;
     }
-  });
-
-  if (matchedServicesCount >= 2) {
-    serviceScore = 95;
-    reasons.push(`Multiple overlapping services (${targetCompany.services.slice(0, 3).join(', ')})`);
-  } else if (matchedServicesCount === 1) {
-    serviceScore = 70;
-    reasons.push('Overlapping core digital services');
-  } else if (isDirectTech) {
-    serviceScore = 60;
-    reasons.push('Similar technical service offerings');
+  } else if (isFintechTarget) {
+    const isFintechCompetitor = /fintech|pay|bank|financial|payment|gateway|billing/i.test(`${candidateCategory} ${candidateName}`);
+    if (isFintechCompetitor) {
+      industryScore = 95;
+      serviceScore = 90;
+      targetMarketScore = 85;
+      reasons.push(`Offers competing payment & financial infrastructure solutions`);
+    } else {
+      industryScore = 20;
+      serviceScore = 20;
+      targetMarketScore = 20;
+    }
   } else {
-    serviceScore = 15;
+    const isDirectTech = candidate.candidateType === 'competitor' ||
+                         /software|it|web|mobile|tech|app|digital|saas|agency|automation/i.test(candidateCategory) ||
+                         /infotech|technologies|solutions|software|systems|labs/i.test(candidateName);
+    if (isDirectTech) {
+      industryScore = 95;
+      serviceScore = 85;
+      targetMarketScore = 85;
+      reasons.push(`Operates in the same ${targetCompany.industry || 'Software & IT Solutions'} industry`);
+      reasons.push(`Offers overlapping technology and development services`);
+    } else {
+      industryScore = 25;
+      serviceScore = 20;
+      targetMarketScore = 25;
+    }
   }
 
-  // 4. Target Market Similarity (15%)
-  if (isDirectTech) {
-    targetMarketScore = 85;
-    reasons.push('Serves similar B2B and enterprise client markets');
-  } else {
-    targetMarketScore = 30;
-  }
-
-  // 5. Tech & Scale Similarity (10%)
-  if (isDirectTech) {
-    techScore = 80;
-  } else {
-    techScore = 20;
-  }
+  techScore = industryScore >= 80 ? 80 : 30;
 
   // Calculate Weighted Score
-  // Weights: Location (20%), Industry (25%), Services (30%), Target Market (15%), Tech (10%)
   const totalScore = Math.round(
     (locationScore * 0.20) +
     (industryScore * 0.25) +
@@ -109,7 +107,7 @@ function scoreCompetitorHeuristic(candidate, targetCompany, radiusKm = 25) {
 }
 
 /**
- * Transparent Weighted ICP Scoring Engine
+ * Transparent Weighted ICP Scoring Engine (Domain-Aware)
  */
 function scoreICPHeuristic(candidate, targetCompany, radiusKm = 25) {
   let industryFitScore = 0;
@@ -119,12 +117,13 @@ function scoreICPHeuristic(candidate, targetCompany, radiusKm = 25) {
   const reasons = [];
 
   const distanceKm = candidate.distanceKm;
+  const targetIndustry = (targetCompany.industry || '').toLowerCase();
+  const targetCategory = (targetCompany.category || '').toLowerCase();
   const candidateCategory = (candidate.category || '').toLowerCase();
   const candidateName = (candidate.name || '').toLowerCase();
   const candidateText = `${candidateCategory} ${candidateName}`.toLowerCase();
 
-  // Target company services (e.g. custom software, web dev, mobile app, UI/UX)
-  const isSoftwareProvider = true; // Target provides software/tech solutions
+  const isEducationTarget = /education|admission|university|college|student|recruitment|counseling|study abroad/i.test(`${targetIndustry} ${targetCategory}`);
 
   // 1. Location Fit (20%)
   if (distanceKm != null) {
@@ -132,50 +131,58 @@ function scoreICPHeuristic(candidate, targetCompany, radiusKm = 25) {
       locationFitScore = 95;
       reasons.push(`Located within target geographic market (${distanceKm} km)`);
     } else {
-      locationFitScore = 40;
+      locationFitScore = 50;
     }
   } else {
     locationFitScore = 70;
   }
 
   // 2. Industry Fit & Business Type (30% + 20%)
-  const isSoftwareCompetitor = /\b(software|it|web|mobile|tech|app|digital|saas|agency)\b/i.test(candidateCategory) ||
-                               /\b(infotech|technologies|solutions|software|systems)\b/i.test(candidateName);
-
-  if (isSoftwareCompetitor) {
-    // Other software companies are usually competitors, not primary target buyers (unless sub-contracting)
-    industryFitScore = 20;
-    businessTypeScore = 25;
-  } else if (/hospital|health|clinic|doctor|pharma|medical/i.test(candidateText)) {
-    industryFitScore = 90;
-    businessTypeScore = 85;
-    serviceNeedScore = 90;
-    reasons.push('Healthcare industry with high demand for custom software, patient portals & digitised systems');
-  } else if (/real estate|builder|property|developer|infrastructure|construction/i.test(candidateText)) {
-    industryFitScore = 88;
-    businessTypeScore = 80;
-    serviceNeedScore = 85;
-    reasons.push('Real estate enterprise requiring custom Web/Mobile CRM and project management platforms');
-  } else if (/retail|store|milk|dairy|fmcg|e-commerce|shop|manufacturing|factory|logistics|transport/i.test(candidateText)) {
-    industryFitScore = 92;
-    businessTypeScore = 90;
-    serviceNeedScore = 90;
-    reasons.push('FMCG & Logistics enterprise needing ERP, E-Commerce, mobile ordering & workflow automation');
-  } else if (/bank|finance|capital|investment|credit|school|college|university|education|hotel|resort/i.test(candidateText)) {
-    industryFitScore = 85;
-    businessTypeScore = 85;
-    serviceNeedScore = 85;
-    reasons.push('Established service enterprise requiring web development, mobile apps and cloud modernization');
+  if (isEducationTarget) {
+    // For education admissions consulting/referrals, ICPs are Universities, Colleges, Institutes & Schools
+    const isAcademicInstitution = /university|college|institute|academy|school|faculty|polytechnic|campus|business school/i.test(candidateText);
+    if (isAcademicInstitution) {
+      industryFitScore = 98;
+      businessTypeScore = 95;
+      serviceNeedScore = 95;
+      reasons.push('Higher education institution with active student intake quotas & admission pipelines');
+      reasons.push('Ideal prospective client for student referral, consulting & enrollment partnerships');
+    } else {
+      industryFitScore = 30;
+      businessTypeScore = 30;
+      serviceNeedScore = 30;
+    }
   } else {
-    // General local business
-    industryFitScore = 65;
-    businessTypeScore = 60;
-    serviceNeedScore = 65;
-    reasons.push('Local business type commonly requiring custom software and web development');
+    const isSoftwareCompetitor = /\b(software|it|web|mobile|tech|app|digital|saas|agency)\b/i.test(candidateCategory) ||
+                                 /\b(infotech|technologies|solutions|software|systems)\b/i.test(candidateName);
+
+    if (isSoftwareCompetitor) {
+      industryFitScore = 20;
+      businessTypeScore = 25;
+      serviceNeedScore = 20;
+    } else if (/hospital|health|clinic|doctor|pharma|medical/i.test(candidateText)) {
+      industryFitScore = 90;
+      businessTypeScore = 85;
+      serviceNeedScore = 90;
+      reasons.push('Healthcare enterprise with high demand for custom digital systems & workflow automation');
+    } else if (/real estate|builder|property|developer|infrastructure|construction/i.test(candidateText)) {
+      industryFitScore = 88;
+      businessTypeScore = 80;
+      serviceNeedScore = 85;
+      reasons.push('Real estate enterprise requiring CRM and lead management platforms');
+    } else if (/retail|store|fmcg|e-commerce|shop|manufacturing|factory|logistics|transport/i.test(candidateText)) {
+      industryFitScore = 92;
+      businessTypeScore = 90;
+      serviceNeedScore = 90;
+      reasons.push('Enterprise needing supply chain, e-commerce, and workflow solutions');
+    } else {
+      industryFitScore = 65;
+      businessTypeScore = 60;
+      serviceNeedScore = 65;
+      reasons.push('Enterprise matching target buyer profile in target territory');
+    }
   }
 
-  // Calculate Weighted Score
-  // Weights: Industry Fit (30%), Location (20%), Service Need (30%), Business Type (20%)
   const totalScore = Math.round(
     (industryFitScore * 0.30) +
     (locationFitScore * 0.20) +
@@ -193,7 +200,7 @@ function scoreICPHeuristic(candidate, targetCompany, radiusKm = 25) {
   return {
     icpScore: totalScore,
     classification,
-    isPotentialICP: !isSoftwareCompetitor && totalScore >= 50,
+    isPotentialICP: totalScore >= 50,
     reasons: Array.from(new Set(reasons))
   };
 }

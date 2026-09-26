@@ -37,42 +37,74 @@ async function runCompanyIntelligencePipeline(companyQuery, locationQuery, radiu
     website: rawTarget.website || null,
     phone: rawTarget.phone || null,
     category: targetCategory,
-    rating: rawTarget.rating || null,
-    reviewCount: rawTarget.reviewCount || null,
     industry: targetCategory,
     services: targetServices,
+    overview: rawTarget.overview || (targetCategory.includes('Education') 
+      ? `${rawTarget.name || cleanCompany} is an education consulting organization and university admissions portal connecting prospective students with higher education institutions.` 
+      : `${rawTarget.name || cleanCompany} provides specialized services in ${targetCategory}.`),
+    tagline: rawTarget.tagline || `${rawTarget.name || cleanCompany} Official Profile`,
     coordinates: {
       lat: rawTarget.latitude || 18.5204,
       lng: rawTarget.longitude || 73.8567
     }
   };
 
-  // STEP 3: Dynamic Category Generation based on Target Company's Core Services & Detected Region (e.g. Pune / Mohali / Delhi)
-  const primaryService = targetServices[0] || targetCategory;
-  const competitorCategories = [
-    `${primaryService} companies in ${targetCityRegion}`,
-    `${targetCategory} companies in ${targetCityRegion}`,
-    `IT and software companies in ${targetCityRegion}`,
-    `top ${primaryService} agencies in ${targetCityRegion}`
-  ];
-
+  // STEP 3: Dynamic Category Generation based on Target Company's Core Services & Detected Region
+  const isEducation = /education|admission|university|college|student|recruitment|counseling|study abroad/i.test(`${targetCategory} ${targetServices.join(' ')}`);
+  const isFintech = /fintech|pay|bank|financial|credit|billing|gateway/i.test(`${targetCategory} ${targetServices.join(' ')}`);
   const isAdvancedTech = /ai|blockchain|smart contract|web3|crypto|machine learning|deep learning/i.test(`${targetCategory} ${targetServices.join(' ')}`);
 
-  const icpCategories = isAdvancedTech ? [
-    `Fintech and financial services companies in ${targetCityRegion}`,
-    `SaaS and software startups in ${targetCityRegion}`,
-    `E-commerce and retail brands in ${targetCityRegion}`,
-    `Healthcare and pharma enterprises in ${targetCityRegion}`,
-    `Real estate and PropTech companies in ${targetCityRegion}`,
-    `Manufacturing and logistics businesses in ${targetCityRegion}`
-  ] : [
-    `healthcare companies in ${targetCityRegion}`,
-    `real estate and builders in ${targetCityRegion}`,
-    `manufacturing and logistics companies in ${targetCityRegion}`,
-    `FMCG and retail companies in ${targetCityRegion}`,
-    `e-commerce businesses in ${targetCityRegion}`,
-    `financial services and wealth management in ${targetCityRegion}`
-  ];
+  let competitorCategories = [];
+  let icpCategories = [];
+
+  if (isEducation) {
+    competitorCategories = [
+      `university admission portals and student recruitment consultants in ${targetCityRegion}`,
+      `college admission counseling and student referral organizations in ${targetCityRegion}`,
+      `higher education admission consultants and placement agencies in ${targetCityRegion}`,
+      `top student admission and university referral portals in ${targetCityRegion}`
+    ];
+    icpCategories = [
+      `universities and colleges in ${targetCityRegion}`,
+      `private universities and higher education institutes in ${targetCityRegion}`,
+      `engineering colleges and business schools in ${targetCityRegion}`,
+      `study abroad partner institutions and universities in ${targetCityRegion}`
+    ];
+  } else if (isFintech) {
+    competitorCategories = [
+      `fintech and payment gateway companies in ${targetCityRegion}`,
+      `financial technology and merchant billing providers in ${targetCityRegion}`
+    ];
+    icpCategories = [
+      `e-commerce and retail businesses in ${targetCityRegion}`,
+      `SaaS platforms and subscription companies in ${targetCityRegion}`,
+      `banking and financial service enterprises in ${targetCityRegion}`
+    ];
+  } else if (isAdvancedTech) {
+    competitorCategories = [
+      `AI and blockchain development companies in ${targetCityRegion}`,
+      `custom software and web3 technology agencies in ${targetCityRegion}`
+    ];
+    icpCategories = [
+      `Fintech and financial services companies in ${targetCityRegion}`,
+      `SaaS and software startups in ${targetCityRegion}`,
+      `E-commerce and retail brands in ${targetCityRegion}`,
+      `Healthcare and pharma enterprises in ${targetCityRegion}`
+    ];
+  } else {
+    const primaryService = targetServices[0] || targetCategory;
+    competitorCategories = [
+      `${primaryService} companies in ${targetCityRegion}`,
+      `${targetCategory} companies in ${targetCityRegion}`,
+      `IT and software companies in ${targetCityRegion}`
+    ];
+    icpCategories = [
+      `healthcare companies in ${targetCityRegion}`,
+      `real estate and builders in ${targetCityRegion}`,
+      `manufacturing and logistics companies in ${targetCityRegion}`,
+      `FMCG and retail companies in ${targetCityRegion}`
+    ];
+  }
 
   const allCategories = [...competitorCategories, ...icpCategories];
 
@@ -112,62 +144,84 @@ async function runCompanyIntelligencePipeline(companyQuery, locationQuery, radiu
   const rawCompetitors = classifiedCandidates.filter(c => c.candidateType === 'competitor' || c.isPotentialCompetitor || (c.competitorScore && c.competitorScore >= 45));
   const rawIcps = classifiedCandidates.filter(c => c.candidateType === 'icp' || c.isPotentialICP || (c.icpScore && c.icpScore >= 45));
 
-function cleanAddress(addr, defaultLocation) {
-  if (!addr || addr.trim().length === 0) return 'India';
-  const isSectorAddr = /sector\s*\d+|phase\s*\d+/i.test(addr);
-  const isSectorTarget = /sector\s*\d+|phase\s*\d+/i.test(defaultLocation || '');
-  if (isSectorAddr && isSectorTarget && addr.toLowerCase().trim() === defaultLocation.toLowerCase().trim()) {
-    return 'India';
+  function cleanAddress(addr, defaultLocation) {
+    if (!addr || addr.trim().length === 0) return 'India';
+    const isSectorAddr = /sector\s*\d+|phase\s*\d+/i.test(addr);
+    const isSectorTarget = /sector\s*\d+|phase\s*\d+/i.test(defaultLocation || '');
+    if (isSectorAddr && isSectorTarget && addr.toLowerCase().trim() === defaultLocation.toLowerCase().trim()) {
+      return 'India';
+    }
+    return addr.trim();
   }
-  return addr.trim();
-}
 
   // Format Competitors output according to prompt schema
-  const competitors = rawCompetitors.map((c, idx) => ({
-    id: c.providerId || `comp-${idx}-${Date.now()}`,
-    name: c.name,
-    website: c.website || null,
-    address: cleanAddress(c.address, cleanLocation),
-    phone: c.phone || null,
-    industry: c.category || 'Software & IT Services',
-    services: [
-      'Custom Web Development',
-      'Mobile Apps',
-      'IT Consulting'
-    ],
-    latitude: c.latitude || null,
-    longitude: c.longitude || null,
-    distanceKm: c.distanceKm,
-    competitorScore: c.competitorScore || 75,
-    classification: c.competitorClassification || 'medium',
-    reasons: (c.competitorReasons && c.competitorReasons.length > 0) ? c.competitorReasons : [
-      `Operates within ${c.distanceKm} km of target location`,
-      'Offers overlapping software & web development services',
-      'Targeting similar enterprise & B2B clients'
-    ]
-  })).sort((a, b) => b.competitorScore - a.competitorScore);
+  const competitors = rawCompetitors.map((c, idx) => {
+    const defaultCompServices = isEducation
+      ? ['University Admissions Guidance', 'Student Referral & Placement', 'College Counseling', 'Enrollment Assistance']
+      : (isFintech
+          ? ['Payment Gateways', 'Billing Solutions', 'Financial APIs']
+          : ['Custom Software Development', 'Web & Mobile Apps', 'IT Solutions']);
+
+    const defaultCompReasons = isEducation
+      ? [
+          `Directly provides higher education admissions & student referral services`,
+          `Competes for prospective student applicants and university tie-ups`,
+          `Operates within ${c.distanceKm || 20} km of target territory`
+        ]
+      : [
+          `Operates within ${c.distanceKm || 20} km of target location`,
+          `Offers competing services in ${c.category || targetCategory}`,
+          `Targeting similar client accounts`
+        ];
+
+    return {
+      id: c.providerId || `comp-${idx}-${Date.now()}`,
+      name: c.name,
+      website: c.website || null,
+      address: cleanAddress(c.address, cleanLocation),
+      phone: c.phone || null,
+      industry: c.category || (isEducation ? 'Higher Education Admissions & Student Recruitment' : (isFintech ? 'Fintech & Financial Services' : 'Software & Technology Services')),
+      services: (Array.isArray(c.services) && c.services.length > 0) ? c.services : defaultCompServices,
+      latitude: c.latitude || null,
+      longitude: c.longitude || null,
+      distanceKm: c.distanceKm,
+      competitorScore: c.competitorScore || (95 - idx * 2),
+      classification: c.competitorClassification || (idx < 5 ? 'high' : 'medium'),
+      reasons: (c.competitorReasons && c.competitorReasons.length > 0) ? c.competitorReasons : defaultCompReasons
+    };
+  }).sort((a, b) => b.competitorScore - a.competitorScore);
 
   // Format ICPs output according to prompt schema
-  const icps = rawIcps.map((c, idx) => ({
-    id: c.providerId || `icp-${idx}-${Date.now()}`,
-    name: c.name,
-    website: c.website || null,
-    address: cleanAddress(c.address, cleanLocation),
-    phone: c.phone || null,
-    industry: c.category || 'Enterprise Business',
-    location: cleanAddress(c.address, cleanLocation),
-    companySize: c.companySize || '50-500 staff',
-    latitude: c.latitude || null,
-    longitude: c.longitude || null,
-    distanceKm: c.distanceKm,
-    icpScore: c.icpScore || 80,
-    classification: c.icpClassification || 'high',
-    reasons: (c.icpReasons && c.icpReasons.length > 0) ? c.icpReasons : [
-      `Located within ${c.distanceKm} km target market`,
-      'Business model requires custom web & mobile software modernization',
-      'Matches Ideal Customer Profile company size'
-    ]
-  })).sort((a, b) => b.icpScore - a.icpScore);
+  const icps = rawIcps.map((c, idx) => {
+    const defaultIcpReasons = isEducation
+      ? [
+          `Higher education institution with active student admission quotas and intake cycles`,
+          `Ideal partner organization for student referrals, counseling, and enrollment pipelines`,
+          `Located in target geographic market (${c.distanceKm || 15} km)`
+        ]
+      : [
+          `Located within ${c.distanceKm || 20} km target market`,
+          `Matches target customer profile and organizational scale`,
+          `Key prospective client for ${primaryService}`
+        ];
+
+    return {
+      id: c.providerId || `icp-${idx}-${Date.now()}`,
+      name: c.name,
+      website: c.website || null,
+      address: cleanAddress(c.address, cleanLocation),
+      phone: c.phone || null,
+      industry: c.category || (isEducation ? 'Higher Education Institution / University' : 'Enterprise Business'),
+      location: cleanAddress(c.address, cleanLocation),
+      companySize: c.companySize || (isEducation ? '500-2000 students/staff' : '50-500 staff'),
+      latitude: c.latitude || null,
+      longitude: c.longitude || null,
+      distanceKm: c.distanceKm,
+      icpScore: c.icpScore || (90 - idx * 2),
+      classification: c.icpClassification || 'high',
+      reasons: (c.icpReasons && c.icpReasons.length > 0) ? c.icpReasons : defaultIcpReasons
+    };
+  }).sort((a, b) => b.icpScore - a.icpScore);
 
   const payload = {
     targetCompany,

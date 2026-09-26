@@ -30,12 +30,12 @@ function normalizeLocationString(loc) {
 /**
  * Call Groq AI API with automatic model retry fallback
  */
-async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requestedModel = 'openai/gpt-oss-20b') {
+async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requestedModel = 'qwen/qwen3.8-27b') {
   const candidateModels = Array.from(new Set([
     requestedModel,
-    'openai/gpt-oss-20b',
-    'openai/gpt-oss-120b',
     'qwen/qwen3.8-27b',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b',
     'allam-2-7b'
   ])).filter(Boolean);
 
@@ -51,7 +51,7 @@ async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requested
             { role: 'user', content: prompt }
           ],
           temperature: 0.2,
-          max_tokens: 600
+          max_tokens: 1500
         });
 
         const options = {
@@ -315,9 +315,9 @@ function heuristicSynthesize(scrapedData) {
   if (text.includes('beauty') || text.includes('salon') || text.includes('skincare') || text.includes('cosmetic') || text.includes('spa') || text.includes('hair') || text.includes('grooming')) {
     industry = 'Beauty & Personal Care';
     subIndustry = 'Salon Services & Skincare E-Commerce';
-  } else if (text.includes('uniportal') || text.includes('university') || text.includes('education') || text.includes('portal') || text.includes('college') || text.includes('student') || text.includes('.edu') || text.includes('school')) {
-    industry = 'Education Technology (EdTech) & Institutional Software';
-    subIndustry = 'University & Higher Education Management Portal';
+  } else if (text.includes('uniportal') || text.includes('admission') || text.includes('university') || text.includes('education') || text.includes('portal') || text.includes('college') || text.includes('student') || text.includes('.edu') || text.includes('school')) {
+    industry = 'Higher Education Admissions & Student Recruitment';
+    subIndustry = 'University Admissions Guidance & Student Referral Consulting';
   } else if (text.includes('stripe') || text.includes('pay') || text.includes('fintech') || text.includes('bank') || text.includes('billing') || text.includes('payment') || text.includes('razorpay')) {
     industry = 'Fintech & Financial Infrastructure';
     subIndustry = 'Payments, Banking APIs & Merchant Billing';
@@ -338,26 +338,41 @@ function heuristicSynthesize(scrapedData) {
     subIndustry = 'Cloud Security & Compliance Infrastructure';
   }
 
-  const isJunkSnippet = (str) => !str || /(?:cell phone|landline|bio\s*\(|\(\d{3}\)\s*\d{3}-\d{4}.*\(|email\s+[a-z0-9._%+-]+@)/i.test(str);
+  const isJunkSnippet = (str) => !str || /(?:cell phone|landline|bio\s*\(|\(\d{3}\)\s*\d{3}-\d{4}.*\(|email\s+[a-z0-9._%+-]+@|\[\s*\]|\[.*?\]\(.*?\)|!\[Image)/i.test(str);
 
   let tagline = scrapedData.headline;
   if (isJunkSnippet(tagline)) {
-    tagline = scrapedData.title && !isJunkSnippet(scrapedData.title) ? scrapedData.title : `${name} Official Company Profile`;
+    tagline = scrapedData.title && !isJunkSnippet(scrapedData.title) ? scrapedData.title : `${name} Official Organization Profile`;
   }
 
   let overview = scrapedData.description;
   if (isJunkSnippet(overview)) {
     overview = scrapedData.aboutSnippet && !isJunkSnippet(scrapedData.aboutSnippet)
       ? scrapedData.aboutSnippet
-      : `${name} is a technology and software organization operating via ${domain}, providing specialized digital services for its clients.`;
+      : (industry.includes('Education') 
+          ? `${name} is an education consulting organization and university admissions portal that connects prospective students with higher education institutions and academic programs.`
+          : `${name} is a specialized organization operating via ${domain}, providing dedicated services in ${industry}.`);
   }
+
+  // Clean remaining markdown link brackets from overview
+  overview = overview
+    .replace(/!\[.*?\]\(.*?\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\[\[+|\]\]+/g, ' ')
+    .replace(/\[|\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const defaultServices = industry.includes('Education')
+    ? ['University Admissions & Higher Education Guidance', 'Student Referral & Placement Services', 'College Admissions & Enrollment Counseling', 'Application & Visa Assistance']
+    : ['Digital Platform Services', 'Client Solutions', 'Consulting & Strategy'];
 
   return {
     name,
     domain,
     url: scrapedData.url || `https://${domain}`,
-    tagline: tagline || `${name} Technology Platform`,
-    overview: overview || `${name} provides digital products and services via ${domain}.`,
+    tagline: tagline || `${name} Platform`,
+    overview: overview || `${name} provides professional services via ${domain}.`,
     industry,
     subIndustry,
     location: normalizeLocationString(location),
@@ -372,6 +387,7 @@ function heuristicSynthesize(scrapedData) {
       github: null
     },
     techStack: scrapedData.techStack || ['Web Services'],
+    services: defaultServices,
     aiProvider: 'heuristic',
     synthesizedAt: new Date().toISOString()
   };
@@ -385,7 +401,7 @@ async function synthesizeCompanyProfile(scrapedData) {
   const groqKey = process.env.GROQ_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-  const groqModel = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b';
+  const groqModel = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 
   const heuristicProfile = heuristicSynthesize(scrapedData);
 
@@ -394,7 +410,7 @@ async function synthesizeCompanyProfile(scrapedData) {
   "name": "Exact Official Company or Brand Name",
   "tagline": "Clear, concise 1-sentence factual value proposition",
   "overview": "Comprehensive 2-3 sentence overview describing core products, services, target audience, and business model",
-  "industry": "Primary Industry Sector",
+  "industry": "Primary Industry Sector (e.g. Higher Education Admissions & Student Recruitment, EdTech, Healthcare, Fintech, etc.)",
   "subIndustry": "Specific Sub-Industry Niche",
   "location": "Official Headquarters City, State, Country or Address (e.g. San Francisco, CA or Mohali, Punjab, India)",
   "emails": ["official public email addresses if verified"],
@@ -422,70 +438,97 @@ Scraped Phone Numbers: ${(scrapedData.phoneNumbers || []).join(', ')}
 Scraped Social Links: ${JSON.stringify(scrapedData.socialMedia || {})}
 Full Webpage Text: ${(scrapedData.fullContent || scrapedData.aboutSnippet || '').slice(0, 3000)}`;
 
-  try {
-    let aiText = '';
-    let activeProvider = 'heuristic';
+  let aiText = '';
+  let activeProvider = 'heuristic';
 
-    if ((provider === 'gemini' || geminiKey) && geminiKey) {
+  // 1. Try Gemini if valid key exists (starts with AIzaSy)
+  if (geminiKey && geminiKey.startsWith('AIzaSy')) {
+    try {
       activeProvider = 'gemini (1.5-flash search-grounded)';
       aiText = await callGeminiAI(userPrompt, systemPrompt, geminiKey, 'gemini-1.5-flash', true);
-    } else if ((provider === 'groq' || groqKey) && groqKey) {
+    } catch (gErr) {
+      console.warn('[Synthesizer] Gemini notice, trying Groq fallback:', gErr.message);
+    }
+  }
+
+  // 2. Try Groq AI (Ultra-fast & accurate)
+  if (!aiText && groqKey) {
+    try {
       const groqRes = await callGroqAI(userPrompt, systemPrompt, groqKey, groqModel);
       aiText = groqRes.text;
       activeProvider = `groq (${groqRes.usedModel})`;
-    } else if ((provider === 'openai' || openaiKey) && openaiKey) {
+    } catch (groqErr) {
+      console.warn('[Synthesizer] Groq notice, trying OpenAI fallback:', groqErr.message);
+    }
+  }
+
+  // 3. Try OpenAI if available
+  if (!aiText && openaiKey) {
+    try {
       activeProvider = 'openai (gpt-4o-mini)';
       aiText = await callOpenAI(userPrompt, systemPrompt, openaiKey);
-    } else {
-      return heuristicProfile;
+    } catch (oaErr) {
+      console.warn('[Synthesizer] OpenAI notice, using heuristic synthesis:', oaErr.message);
     }
+  }
 
-    const jsonMatch = aiText.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
+  if (aiText) {
+    try {
+      const jsonMatch = aiText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
 
-      const mergedEmails = Array.from(new Set([
-        ...(parsed.emails || []),
-        ...(heuristicProfile.emails || [])
-      ])).filter(Boolean);
+        const mergedEmails = Array.from(new Set([
+          ...(parsed.emails || []),
+          ...(heuristicProfile.emails || [])
+        ])).filter(Boolean);
 
-      const mergedPhones = Array.from(new Set([
-        ...(parsed.phoneNumbers || []),
-        ...(heuristicProfile.phoneNumbers || [])
-      ])).filter(Boolean);
+        const mergedPhones = Array.from(new Set([
+          ...(parsed.phoneNumbers || []),
+          ...(heuristicProfile.phoneNumbers || [])
+        ])).filter(Boolean);
 
-      const mergedSocialMedia = {
-        linkedin: parsed.socialMedia?.linkedin || heuristicProfile.socialMedia?.linkedin || null,
-        twitter: parsed.socialMedia?.twitter || heuristicProfile.socialMedia?.twitter || null,
-        facebook: parsed.socialMedia?.facebook || heuristicProfile.socialMedia?.facebook || null,
-        instagram: parsed.socialMedia?.instagram || heuristicProfile.socialMedia?.instagram || null,
-        youtube: parsed.socialMedia?.youtube || heuristicProfile.socialMedia?.youtube || null,
-        github: parsed.socialMedia?.github || heuristicProfile.socialMedia?.github || null,
-      };
+        const mergedSocialMedia = {
+          linkedin: parsed.socialMedia?.linkedin || heuristicProfile.socialMedia?.linkedin || null,
+          twitter: parsed.socialMedia?.twitter || heuristicProfile.socialMedia?.twitter || null,
+          facebook: parsed.socialMedia?.facebook || heuristicProfile.socialMedia?.facebook || null,
+          instagram: parsed.socialMedia?.instagram || heuristicProfile.socialMedia?.instagram || null,
+          youtube: parsed.socialMedia?.youtube || heuristicProfile.socialMedia?.youtube || null,
+          github: parsed.socialMedia?.github || heuristicProfile.socialMedia?.github || null,
+        };
 
-      const parsedLoc = normalizeLocationString(parsed.location);
-      const locationToUse = (parsedLoc && parsedLoc !== 'Global Operations' && parsedLoc !== 'Global')
-        ? parsedLoc
-        : (heuristicProfile.location && heuristicProfile.location !== 'Global Operations' ? heuristicProfile.location : (parsedLoc || 'India'));
+        const parsedLoc = normalizeLocationString(parsed.location);
+        const locationToUse = (parsedLoc && parsedLoc !== 'Global Operations' && parsedLoc !== 'Global')
+          ? parsedLoc
+          : (heuristicProfile.location && heuristicProfile.location !== 'Global Operations' ? heuristicProfile.location : (parsedLoc || 'India'));
 
-      return {
-        ...heuristicProfile,
-        name: parsed.name || heuristicProfile.name,
-        tagline: parsed.tagline || heuristicProfile.tagline,
-        overview: parsed.overview || heuristicProfile.overview,
-        industry: parsed.industry || heuristicProfile.industry,
-        subIndustry: parsed.subIndustry || heuristicProfile.subIndustry,
-        location: locationToUse,
-        emails: mergedEmails,
-        phoneNumbers: mergedPhones,
-        socialMedia: mergedSocialMedia,
-        services: parsed.services || [],
-        aiProvider: activeProvider,
-        synthesizedAt: new Date().toISOString()
-      };
+        let cleanOverview = (parsed.overview || heuristicProfile.overview)
+          .replace(/!\[.*?\]\(.*?\)/g, '')
+          .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+          .replace(/\[\[+|\]\]+/g, ' ')
+          .replace(/\[|\]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        return {
+          ...heuristicProfile,
+          name: parsed.name || heuristicProfile.name,
+          tagline: parsed.tagline || heuristicProfile.tagline,
+          overview: cleanOverview,
+          industry: parsed.industry || heuristicProfile.industry,
+          subIndustry: parsed.subIndustry || heuristicProfile.subIndustry,
+          location: locationToUse,
+          emails: mergedEmails,
+          phoneNumbers: mergedPhones,
+          socialMedia: mergedSocialMedia,
+          services: (parsed.services && parsed.services.length > 0) ? parsed.services : heuristicProfile.services,
+          aiProvider: activeProvider,
+          synthesizedAt: new Date().toISOString()
+        };
+      }
+    } catch (parseErr) {
+      console.warn('[Synthesizer] JSON parse error from AI response:', parseErr.message);
     }
-  } catch (err) {
-    console.warn(`AI Provider (${provider}) notice, using heuristic synthesis:`, err.message);
   }
 
   return heuristicProfile;

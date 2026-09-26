@@ -144,6 +144,10 @@ async function searchTargetCompany(companyName, location) {
           if (profile.subIndustry) profileServices.unshift(profile.subIndustry);
           if (profile.industry && !profileServices.includes(profile.industry)) profileServices.unshift(profile.industry);
 
+          const finalServices = (Array.isArray(profile.services) && profile.services.length > 0)
+            ? profile.services
+            : (profileServices.length > 0 ? profileServices : [profile.subIndustry || profile.industry || 'Professional Services']);
+
           return {
             providerId: `scraped-${Date.now()}`,
             name: profile.name || cleanComp.toUpperCase(),
@@ -152,8 +156,10 @@ async function searchTargetCompany(companyName, location) {
             region: profile.location || location,
             website: profile.url || targetUrl,
             phone: (profile.phoneNumbers && profile.phoneNumbers[0]) || null,
-            category: profile.industry || 'Artificial Intelligence & Software Development',
-            services: profileServices.length > 0 ? profileServices : ['AI Automation & Web3 Platforms', 'Custom Web Development', 'IT Solutions'],
+            category: profile.industry || profile.subIndustry || 'Professional Services',
+            services: finalServices,
+            overview: profile.overview,
+            tagline: profile.tagline,
             rating: 4.8,
             reviewCount: 25,
             latitude: 18.5204,
@@ -388,18 +394,42 @@ async function searchNearbyBusinesses(centerLat, centerLng, radiusKm, categories
 
   const searchLocation = sanitizeLocationForSearch(targetLocationStr);
 
-  const categoryGroups = [
-    { 
-      type: 'competitor', 
-      label: 'Software & Web Development Companies',
-      query: `software, web development, IT, and AI automation companies in ${searchLocation}`
-    },
-    { 
-      type: 'icp', 
-      label: 'Healthcare, Real Estate & Enterprise Businesses',
-      query: `healthcare, real estate, manufacturing, and FMCG companies in ${searchLocation}`
+  let categoryGroups = [];
+  if (Array.isArray(categories) && categories.length > 0) {
+    if (typeof categories[0] === 'object' && categories[0].query) {
+      categoryGroups = categories;
+    } else {
+      const compQueries = categories.filter(c => typeof c === 'string' && !/healthcare|real estate|fmcg|manufacturing|universit|college/i.test(c));
+      const icpQueries = categories.filter(c => typeof c === 'string' && /healthcare|real estate|fmcg|manufacturing|universit|college/i.test(c));
+      categoryGroups = [
+        {
+          type: 'competitor',
+          label: compQueries[0] || 'Direct Industry Competitors',
+          query: compQueries.join(', ') || `companies in ${searchLocation}`
+        },
+        {
+          type: 'icp',
+          label: icpQueries[0] || 'Target Customer & Partner Organizations',
+          query: icpQueries.join(', ') || `enterprises in ${searchLocation}`
+        }
+      ];
     }
-  ];
+  }
+
+  if (categoryGroups.length === 0) {
+    categoryGroups = [
+      { 
+        type: 'competitor', 
+        label: 'Direct Industry Competitors',
+        query: `direct rival companies and service providers in ${searchLocation}`
+      },
+      { 
+        type: 'icp', 
+        label: 'Target Customer Organizations & Enterprise Clients',
+        query: `organizations, institutional partners, and enterprises in ${searchLocation}`
+      }
+    ];
+  }
 
   const allResults = [];
 
@@ -495,17 +525,17 @@ async function searchNearbyBusinesses(centerLat, centerLng, radiusKm, categories
     // 3. Gemini 2.5 Flash Live Grounded Search / Groq AI (100% REAL LIVE DATA)
     if (catResults.length === 0 && (geminiApiKey || groqApiKey)) {
       try {
-        const searchKeyword = grp.type === 'competitor' ? 'software, IT, web development, and AI automation companies' : 'healthcare, real estate, manufacturing, and FMCG companies';
-        const prompt = `Search live Google web results for 10 real existing active ${searchKeyword} located in or operating in "${searchLocation}". 
-DO NOT return mega IT conglomerates like TCS, Wipro, Infosys. Return 10 real local companies operating in ${searchLocation}.
+        const searchKeyword = grp.query || grp.label;
+        const prompt = `Search live web results for 8-10 real, active, existing ${searchKeyword} located in or operating in "${searchLocation}". 
+Return real companies/organizations matching this exact domain in ${searchLocation}.
 Return ONLY a raw JSON array of objects with exact keys:
 [
   {
-    "name": "Exact Real Company Name",
+    "name": "Exact Real Organization Name",
     "address": "Actual HQ City, State, Country",
     "website": "https://official-domain.com",
     "phone": "Phone number or null",
-    "category": "${searchKeyword}",
+    "category": "${grp.label}",
     "rating": 4.5,
     "reviewCount": 30,
     "latitude": null,
@@ -514,7 +544,7 @@ Return ONLY a raw JSON array of objects with exact keys:
 ]`;
 
         let raw = null;
-        if (geminiApiKey) {
+        if (geminiApiKey && geminiApiKey.startsWith('AIzaSy')) {
           try {
             raw = await callGeminiAI(
               prompt,
@@ -534,9 +564,9 @@ Return ONLY a raw JSON array of objects with exact keys:
           try {
             const groqRes = await callGroqAI(
               prompt,
-              'You are a B2B database. Output only a raw JSON array. Do not write any explanations, markdown or conversational text.',
+              'You are a professional B2B intelligence database. Output only a raw JSON array of real companies. Do not write markdown codeblocks or conversational text.',
               groqApiKey,
-              'allam-2-7b'
+              'openai/gpt-oss-120b'
             );
             raw = groqRes.text;
           } catch (e) {
@@ -624,7 +654,7 @@ function deduplicateCompanies(candidates, targetCompany) {
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
-    const req = client.get(url, { timeout: 5000 }, (res) => {
+    const req = client.get(url, { timeout: 2500 }, (res) => {
       let raw = '';
       res.on('data', chunk => raw += chunk);
       res.on('end', () => {
