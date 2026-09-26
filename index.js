@@ -113,6 +113,7 @@ app.use('/api', require('./routes/webpilotSearch'));
 app.use('/api', require('./routes/webpilotSearches'));
 app.use('/api', require('./routes/webpilotOutreach'));
 app.use('/api', require('./routes/webpilotLeads'));
+app.use('/api/autogtm', require('./routes/autogtmCampaigns'));
 app.get('/health', systemController.getHealth);
 
 // Tracking pixel endpoint
