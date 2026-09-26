@@ -100,6 +100,17 @@ const autoGtmCampaignSchema = new mongoose.Schema({
   dailyCap: {
     type: String,
     default: '25'
+  },
+  targetingCriteria: {
+    employeeCounts: [{ type: String }],
+    companyStages: [{ type: String }],
+    revenueRanges: [{ type: String }],
+    countries: [{ type: String }],
+    industries: [{ type: String }],
+    decisionMakerRole: { type: String, default: '' },
+    seniorityLevels: [{ type: String }],
+    growthSignals: [{ type: String }],
+    minRevenue: { type: String, default: '$50,000+' }
   }
 }, {
   timestamps: true

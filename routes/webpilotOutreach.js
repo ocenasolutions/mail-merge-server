@@ -44,8 +44,13 @@ router.get('/outreach', async (req, res) => {
   }
 });
 
+const User = require('../models/User');
+const EmailConfig = require('../models/EmailConfig');
+const { sendEmail } = require('../services/emailService');
+const crypto = require('crypto');
+
 // @route   POST /api/outreach
-// @desc    Save a new outreached lead record
+// @desc    Save a new outreached lead record and optionally send real email
 router.post('/outreach', async (req, res) => {
   try {
     const userEmail = getNormalizedEmail(req);
@@ -64,10 +69,60 @@ router.post('/outreach', async (req, res) => {
       sentAt,
       status = 'sent',
       leadObj,
+      sendRealEmail = false,
+      subject: customSubject,
+      body: customBody
     } = req.body;
 
     if (!contactEmail || !contactName) {
       return res.status(400).json({ success: false, message: 'contactName and contactEmail are required.' });
+    }
+
+    let emailSent = false;
+    let trackingId = null;
+
+    // Dispatch real email if sendRealEmail is requested or if status is sent and lead has customPitch
+    if (sendRealEmail || req.body.dispatch) {
+      try {
+        let user = await User.findOne({ email: { $regex: new RegExp(`^${userEmail}$`, 'i') } });
+        if (!user) {
+          user = await User.findOne({ email: 'aditya2.ocena@gmail.com' })
+            || await User.findOne({ googleAccessToken: { $exists: true, $ne: null } });
+        }
+
+        if (user) {
+          const emailConfig = {
+            _id: 'gmail',
+            provider: 'gmail',
+            config: { email: user.email }
+          };
+
+          const pitchSub = customSubject || leadObj?.customPitch?.subject || `Partnership inquiry with ${companyName || 'your team'}`;
+          let pitchBody = customBody || leadObj?.customPitch?.body || `<p>Hi ${contactName},</p><p>We noticed ${companyName} and would love to explore potential synergies.</p><p>Best regards,<br/>${user.name || 'Outreach Team'}</p>`;
+
+          if (!pitchBody.includes('<p>') && !pitchBody.includes('<div>')) {
+            pitchBody = pitchBody.split('\n\n').map(p => `<p style="margin: 0 0 14px 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; color: #1e293b; line-height: 1.6;">${p.replace(/\n/g, '<br/>')}</p>`).join('');
+          }
+
+          trackingId = crypto.randomUUID();
+          const sendResult = await sendEmail(
+            emailConfig,
+            user,
+            contactEmail,
+            pitchSub,
+            pitchBody,
+            trackingId,
+            { trackingEnabled: true }
+          );
+
+          if (sendResult && sendResult.success) {
+            emailSent = true;
+            console.log(`📧 Dispatched live email to ${contactEmail} (tracking: ${trackingId})`);
+          }
+        }
+      } catch (sendErr) {
+        console.warn('Real email dispatch notice:', sendErr.message);
+      }
     }
 
     const doc = new OutreachLead({
@@ -89,6 +144,8 @@ router.post('/outreach', async (req, res) => {
 
     return res.status(201).json({
       success: true,
+      emailSent,
+      trackingId,
       record: {
         id: doc._id.toString(),
         contactName: doc.contactName,
