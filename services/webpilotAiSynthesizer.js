@@ -163,10 +163,10 @@ async function callOpenAI(prompt, systemInstruction = '', apiKey = '', model = '
 /**
  * Call Gemini API (Gemini 1.5 Flash / 2.0 Flash) with optional Google Search Grounding
  */
-async function callGeminiAI(prompt, systemInstruction = '', apiKey = '', requestedModel = 'gemini-2.5-flash', enableSearchGrounding = true, timeoutMs = 30000) {
+async function callGeminiAI(prompt, systemInstruction = '', apiKey = '', requestedModel = 'gemini-2.5-flash', enableSearchGrounding = true, timeoutMs = 8000) {
   const effectiveKey = apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-  if (!effectiveKey) {
-    throw new Error('No Gemini API key provided (set GEMINI_API_KEY or GOOGLE_API_KEY environment variable)');
+  if (!effectiveKey || !effectiveKey.startsWith('AIzaSy')) {
+    throw new Error('No valid Google Gemini API key provided (must start with AIzaSy)');
   }
 
   const model = 'gemini-2.5-flash';
