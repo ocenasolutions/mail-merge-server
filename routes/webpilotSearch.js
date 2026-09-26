@@ -122,7 +122,7 @@ router.post('/search', async (req, res) => {
       } else if (apolloResult.contacts && apolloResult.contacts.length > 0) {
         icpLeads = apolloResult.contacts.map((c, idx) => ({
           id: `apollo-icp-${idx}-${Date.now()}`,
-          name: c.organization?.name || profile.name || profile.domain,
+          name: c.organization?.name || `${profile.name || profile.domain} Enterprise Partner`,
           website: `https://${profile.domain}`,
           domain: profile.domain,
           industry: profile.industry || 'Technology',
@@ -137,7 +137,7 @@ router.post('/search', async (req, res) => {
           techStack: profile.techStack || ['Modern Stack'],
           hiringIntent: true,
           openRoles: [c.title],
-          description: `${c.name} (${c.title}) at ${profile.name || profile.domain} — Verified Apollo B2B Decision Maker Lead.`,
+          description: `${c.name} (${c.title}) — Verified Apollo B2B Decision Maker Lead.`,
           isIcpLead: true,
           matchScore: 99 - (idx * 2),
           matchedReasoning: `Apollo B2B Verified Contact: ${c.name} (${c.title}). Status: ${c.emailStatus}.`,
@@ -165,49 +165,6 @@ router.post('/search', async (req, res) => {
             linkedin: c.linkedin || null,
             twitter: c.twitter || null
           }
-        }));
-      } else if (profile.emails && profile.emails.length > 0) {
-        icpLeads = profile.emails.map((email, idx) => ({
-          id: `web-contact-${idx}-${Date.now()}`,
-          name: email.split('@')[0].replace(/[._-]/g, ' ').toUpperCase(),
-          website: `https://${profile.domain}`,
-          domain: profile.domain,
-          industry: profile.industry || 'Technology',
-          subIndustry: profile.subIndustry || 'Software & Services',
-          location: profile.location || 'Global',
-          region: 'Global',
-          employeeCount: 250,
-          headcountRange: '50-500',
-          fundingStage: 'Enterprise',
-          fundingAmount: 'N/A',
-          techStack: profile.techStack || ['Modern Stack'],
-          hiringIntent: true,
-          openRoles: ['Web Contact'],
-          description: `Extracted live website contact (${email}) for ${profile.name || profile.domain}.`,
-          isIcpLead: true,
-          matchScore: 99 - (idx * 2),
-          matchedReasoning: `Extracted live web contact from ${profile.domain}. Verified DOM email.`,
-          contacts: [{
-            id: `web-cnt-${idx}`,
-            name: email.split('@')[0].toUpperCase(),
-            title: 'Extracted Web Contact',
-            email: email,
-            linkedin: profile.socialMedia?.linkedin || '',
-            verified: true,
-            score: 99
-          }],
-          primaryContact: {
-            id: `web-cnt-${idx}`,
-            name: email.split('@')[0].toUpperCase(),
-            title: 'Extracted Web Contact',
-            email: email,
-            linkedin: profile.socialMedia?.linkedin || '',
-            verified: true,
-            score: 99
-          },
-          emails: [email],
-          phoneNumbers: profile.phoneNumbers || [],
-          socialMedia: profile.socialMedia || {}
         }));
       } else {
         icpLeads = [];

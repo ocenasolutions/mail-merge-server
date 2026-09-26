@@ -51,7 +51,7 @@ async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requested
             { role: 'user', content: prompt }
           ],
           temperature: 0.2,
-          max_tokens: 1500
+          max_tokens: 4096
         });
 
         const options = {
@@ -63,7 +63,7 @@ async function callGroqAI(prompt, systemInstruction = '', apiKey = '', requested
             'Authorization': `Bearer ${apiKey}`,
             'Content-Length': Buffer.byteLength(postData)
           },
-          timeout: 10000
+          timeout: 20000
         };
 
         const req = https.request(options, (res) => {
