@@ -56,13 +56,22 @@ async function runCompanyIntelligencePipeline(companyQuery, locationQuery, radiu
     `top ${primaryService} agencies in ${targetCityRegion}`
   ];
 
-  const icpCategories = [
+  const isAdvancedTech = /ai|blockchain|smart contract|web3|crypto|machine learning|deep learning/i.test(`${targetCategory} ${targetServices.join(' ')}`);
+
+  const icpCategories = isAdvancedTech ? [
+    `Fintech and financial services companies in ${targetCityRegion}`,
+    `SaaS and software startups in ${targetCityRegion}`,
+    `E-commerce and retail brands in ${targetCityRegion}`,
+    `Healthcare and pharma enterprises in ${targetCityRegion}`,
+    `Real estate and PropTech companies in ${targetCityRegion}`,
+    `Manufacturing and logistics businesses in ${targetCityRegion}`
+  ] : [
     `healthcare companies in ${targetCityRegion}`,
-    `real estate companies in ${targetCityRegion}`,
-    `manufacturing companies in ${targetCityRegion}`,
-    `FMCG companies in ${targetCityRegion}`,
+    `real estate and builders in ${targetCityRegion}`,
+    `manufacturing and logistics companies in ${targetCityRegion}`,
+    `FMCG and retail companies in ${targetCityRegion}`,
     `e-commerce businesses in ${targetCityRegion}`,
-    `educational institutions in ${targetCityRegion}`
+    `financial services and wealth management in ${targetCityRegion}`
   ];
 
   const allCategories = [...competitorCategories, ...icpCategories];
